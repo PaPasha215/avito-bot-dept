@@ -18,6 +18,7 @@ from app.services.lead_detector import LeadDetector
 from app.services.prompt_service import PromptService
 from app.services.retry import with_retry
 from app.services.router import RouterService
+from app.services.self_learning import SelfLearningService
 from app.types import ChatDecision, ChatState, IncomingEvent, LeadStatus, MessageDirection
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class MessageProcessor:
         telegram_client: TelegramClient,
         router_service: RouterService,
         prompt_service: PromptService,
+        self_learning_service: SelfLearningService | None,
         lead_detector: LeadDetector,
         retention_service: RetentionService,
     ):
@@ -52,6 +54,7 @@ class MessageProcessor:
         self.telegram_client = telegram_client
         self.router_service = router_service
         self.prompt_service = prompt_service
+        self.self_learning_service = self_learning_service
         self.lead_detector = lead_detector
         self.retention_service = retention_service
 
@@ -69,9 +72,15 @@ class MessageProcessor:
             )
             stats.polled_events = len(events)
 
+            latest_inbound_event_by_chat: dict[str, str] = {}
+            for event in events:
+                if event.sender_type in {"user", "client", "buyer", "inbound"}:
+                    latest_inbound_event_by_chat[event.chat_id] = event.event_id
+
             for event in events:
                 try:
-                    outcome = self._process_event(db=db, event=event)
+                    allow_reply = latest_inbound_event_by_chat.get(event.chat_id) == event.event_id
+                    outcome = self._process_event(db=db, event=event, allow_reply=allow_reply)
                     if outcome == "ignored":
                         stats.ignored_events += 1
                     elif outcome == "replied":
@@ -92,10 +101,25 @@ class MessageProcessor:
 
         with SessionLocal() as cleanup_db:
             self.retention_service.run_if_due(cleanup_db, retention_days=self.settings.retention_days)
+            if self.self_learning_service is not None:
+                try:
+                    learn_result = self.self_learning_service.run_if_due(cleanup_db)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Self-learning cycle failed: %s", exc)
+                else:
+                    if learn_result is not None:
+                        logger.info(
+                            "Self-learning cycle done: action=%s active=%s stable=%s created=%s source_chats=%s",
+                            learn_result.action,
+                            learn_result.active_version,
+                            learn_result.stable_version,
+                            learn_result.examples_created,
+                            learn_result.source_chats,
+                        )
 
         return stats
 
-    def _process_event(self, db: Session, event: IncomingEvent) -> str:
+    def _process_event(self, db: Session, event: IncomingEvent, allow_reply: bool = True) -> str:
         repo = Repository(db)
         payload = json.dumps(
             {
@@ -171,6 +195,11 @@ class MessageProcessor:
                 db.commit()
                 return "ignored"
 
+            if not allow_reply:
+                repo.mark_event_processed(event_log.id)
+                db.commit()
+                return "processed"
+
             prompt = self.prompt_service.get_real_estate_prompt(db)
             history_messages = repo.get_recent_messages(chat.id, limit=self.settings.max_recent_messages_for_reply)
             chat_history = [
@@ -180,9 +209,23 @@ class MessageProcessor:
                 }
                 for m in history_messages
             ]
+            effective_prompt_text = prompt.text
+            learning_version: str | None = None
+            learning_examples_count = 0
+            if self.self_learning_service is not None:
+                try:
+                    effective_prompt_text, learning_version, learning_examples_count = self.self_learning_service.build_augmented_prompt(
+                        db=db,
+                        base_prompt=prompt.text,
+                        chat_external_id=chat.external_chat_id,
+                        ad_title=ad.title,
+                        recent_messages=recent_texts,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Self-learning prompt augmentation failed for chat %s: %s", event.chat_id, exc)
 
             response_text = with_retry(
-                lambda: self.openai_client.generate_reply(prompt.text, chat_history),
+                lambda: self.openai_client.generate_reply(effective_prompt_text, chat_history),
                 name="openai_generate_reply",
                 attempts=3,
             )
@@ -208,46 +251,70 @@ class MessageProcessor:
                 payload_json=None,
             )
             repo.set_chat_state(chat.id, ChatState.QUALIFYING)
+            if self.self_learning_service is not None:
+                try:
+                    self.self_learning_service.record_reply_usage(
+                        db=db,
+                        chat_id=chat.id,
+                        external_chat_id=chat.external_chat_id,
+                        learning_version=learning_version,
+                        examples_count=learning_examples_count,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Failed to store self-learning usage for chat %s: %s", event.chat_id, exc)
 
             contact = self._extract_contact(history_messages)
             lead_created = False
             if contact:
-                raw, normalized = contact
-                existing = repo.get_lead_by_contact(chat.id, normalized)
-                if existing is None:
-                    transcript = [
-                        f"{'Кл' if m.direction == MessageDirection.INBOUND.value else 'ИИ'}: {m.text}"
-                        for m in history_messages[-8:]
-                    ]
-                    summary = with_retry(
-                        lambda: self.openai_client.summarize_lead(
-                            ad_title=ad.title,
-                            contact_raw=raw,
-                            transcript=transcript,
-                        ),
-                        name="openai_summarize_lead",
-                        attempts=2,
-                    )
-                    lead = repo.create_lead(
-                        chat_id=chat.id,
-                        contact_raw=raw,
-                        contact_normalized=normalized,
-                        summary=summary,
-                    )
-                    if lead:
-                        repo.set_chat_state(chat.id, ChatState.CONTACT_RECEIVED)
-                        self._send_lead_to_telegram(
-                            lead_id=lead.id,
-                            ad_title=ad.title,
-                            ad_url=ad.url,
-                            customer_name=chat.customer_name,
-                            contact_raw=raw,
-                            summary=summary,
-                            context_lines=transcript,
+                try:
+                    raw, normalized = contact
+                    existing = repo.get_lead_by_contact(chat.id, normalized)
+                    if existing is None:
+                        transcript = [
+                            f"{'Кл' if m.direction == MessageDirection.INBOUND.value else 'ИИ'}: {m.text}"
+                            for m in history_messages[-8:]
+                        ]
+                        summary = with_retry(
+                            lambda: self.openai_client.summarize_lead(
+                                ad_title=ad.title,
+                                contact_raw=raw,
+                                transcript=transcript,
+                            ),
+                            name="openai_summarize_lead",
+                            attempts=2,
                         )
-                        repo.mark_lead_sent(lead.id)
-                        repo.set_chat_state(chat.id, ChatState.TRANSFERRED_TO_MANAGER)
-                        lead_created = True
+                        lead = repo.create_lead(
+                            chat_id=chat.id,
+                            contact_raw=raw,
+                            contact_normalized=normalized,
+                            summary=summary,
+                        )
+                        if lead:
+                            repo.set_chat_state(chat.id, ChatState.CONTACT_RECEIVED)
+                            lead_created = True
+                            try:
+                                self._send_lead_to_telegram(
+                                    lead_id=lead.id,
+                                    ad_title=ad.title,
+                                    ad_url=ad.url,
+                                    customer_name=chat.customer_name,
+                                    contact_raw=raw,
+                                    summary=summary,
+                                    context_lines=transcript,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.exception(
+                                    "Lead %s created, but Telegram send failed for chat %s: %s",
+                                    lead.id,
+                                    event.chat_id,
+                                    exc,
+                                )
+                            else:
+                                repo.mark_lead_sent(lead.id)
+                                repo.set_chat_state(chat.id, ChatState.TRANSFERRED_TO_MANAGER)
+                except Exception as exc:  # noqa: BLE001
+                    # Lead pipeline must not fail whole event after reply was sent to Avito.
+                    logger.exception("Lead pipeline failed for chat %s: %s", event.chat_id, exc)
 
             repo.mark_event_processed(event_log.id)
             db.commit()

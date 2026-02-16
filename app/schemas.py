@@ -10,6 +10,17 @@ class HealthResponse(BaseModel):
     environment: str
 
 
+class LearningStatusResponse(BaseModel):
+    enabled: bool
+    active_version: str | None
+    stable_version: str | None
+    candidate_started_at: datetime | None
+    last_run_at: datetime | None
+    active_examples: int
+    stable_examples: int
+    total_examples: int
+
+
 class ChatListItem(BaseModel):
     id: int
     external_chat_id: str
@@ -36,6 +47,72 @@ class ChatDetailResponse(BaseModel):
     state: str
     customer_name: str | None
     messages: list[ChatMessageItem]
+
+
+class RoutingDecisionItem(BaseModel):
+    id: int
+    domain: str
+    confidence: float
+    decision: str
+    reason: str
+    created_at: datetime
+
+
+class BotReplyItem(BaseModel):
+    id: int
+    prompt_version: str
+    text: str
+    status: str
+    error: str | None
+    sent_at: datetime
+
+
+class LeadItem(BaseModel):
+    id: int
+    contact_raw: str
+    contact_normalized: str
+    summary: str
+    status: str
+    sent_to_tg_at: datetime | None
+    created_at: datetime
+
+
+class FeedbackEventItem(BaseModel):
+    id: int
+    tag: str
+    comment: str
+    created_at: datetime
+
+
+class EventLogItem(BaseModel):
+    id: int
+    source: str
+    event_type: str
+    idempotency_key: str
+    status: str
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatDiagnosticsResponse(BaseModel):
+    chat_id: int
+    external_chat_id: str
+    ad_title: str
+    ad_url: str | None
+    ad_category: str | None
+    ad_raw_category: str | None
+    domain: str
+    state: str
+    customer_name: str | None
+    inbound_count: int
+    outbound_count: int
+    messages: list[ChatMessageItem]
+    routing_decisions: list[RoutingDecisionItem]
+    bot_replies: list[BotReplyItem]
+    leads: list[LeadItem]
+    feedback_events: list[FeedbackEventItem]
+    event_logs: list[EventLogItem]
 
 
 class LeadListItem(BaseModel):

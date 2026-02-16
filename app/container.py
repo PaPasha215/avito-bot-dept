@@ -14,6 +14,7 @@ from app.services.poller import Poller
 from app.services.processor import MessageProcessor
 from app.services.prompt_service import PromptService
 from app.services.router import RouterService
+from app.services.self_learning import SelfLearningService
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ class AppContainer:
             updates_url=settings.avito_updates_url,
             send_message_url_template=settings.avito_send_message_url_template,
             chat_context_url_template=settings.avito_chat_context_url_template,
+            messages_url_template=settings.avito_messages_url_template,
+            messages_fallback_url_template=settings.avito_messages_fallback_url_template,
             timeout_seconds=settings.avito_request_timeout_seconds,
             poll_limit=settings.avito_poll_limit,
         )
@@ -45,6 +48,7 @@ class AppContainer:
         )
 
         self.prompt_service = PromptService(settings=settings)
+        self.self_learning_service = SelfLearningService(settings=settings)
         classifier = DomainClassifier(openai_client=self.openai_client)
         router = RouterService(classifier=classifier, confidence_threshold=settings.classifier_confidence_threshold)
 
@@ -55,6 +59,7 @@ class AppContainer:
             telegram_client=self.telegram_client,
             router_service=router,
             prompt_service=self.prompt_service,
+            self_learning_service=self.self_learning_service,
             lead_detector=LeadDetector(),
             retention_service=RetentionService(),
         )

@@ -54,6 +54,7 @@ def build_processor(settings: Settings):
         telegram_client=telegram,
         router_service=router,
         prompt_service=PromptService(settings=settings),
+        self_learning_service=None,
         lead_detector=LeadDetector(),
         retention_service=RetentionService(),
     )

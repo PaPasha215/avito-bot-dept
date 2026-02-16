@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from hashlib import sha256
 
 from sqlalchemy import and_, delete, desc, func, select
@@ -15,6 +15,8 @@ from app.models import (
     EventLog,
     FeedbackEvent,
     Lead,
+    LearningExample,
+    LearningReplyUsage,
     Message,
     Prompt,
     RoutingDecision,
@@ -302,6 +304,264 @@ class Repository:
     def get_chat_by_external_id(self, external_chat_id: str) -> Chat | None:
         return self.db.scalar(select(Chat).where(Chat.external_chat_id == external_chat_id))
 
+    def list_feedback_events_by_chat(self, chat_id: int) -> list[FeedbackEvent]:
+        return self.db.scalars(
+            select(FeedbackEvent)
+            .where(FeedbackEvent.chat_id == chat_id)
+            .order_by(FeedbackEvent.created_at.asc())
+        ).all()
+
+    def list_leads_by_chat(self, chat_id: int) -> list[Lead]:
+        return self.db.scalars(
+            select(Lead)
+            .where(Lead.chat_id == chat_id)
+            .order_by(Lead.created_at.asc())
+        ).all()
+
+    def get_learning_candidate_chat_ids(self, since: datetime, limit: int = 200) -> list[int]:
+        lead_rows = self.db.execute(
+            select(Lead.chat_id, func.max(Lead.created_at))
+            .where(Lead.created_at >= since)
+            .group_by(Lead.chat_id)
+        ).all()
+        feedback_rows = self.db.execute(
+            select(FeedbackEvent.chat_id, func.max(FeedbackEvent.created_at))
+            .where(
+                and_(
+                    FeedbackEvent.chat_id.is_not(None),
+                    FeedbackEvent.created_at >= since,
+                )
+            )
+            .group_by(FeedbackEvent.chat_id)
+        ).all()
+
+        latest_by_chat: dict[int, datetime] = {}
+        for chat_id, created_at in [*lead_rows, *feedback_rows]:
+            if chat_id is None or created_at is None:
+                continue
+            previous = latest_by_chat.get(chat_id)
+            if previous is None or created_at > previous:
+                latest_by_chat[chat_id] = created_at
+
+        ordered = sorted(latest_by_chat.items(), key=lambda x: x[1], reverse=True)
+        return [chat_id for chat_id, _ in ordered[:limit]]
+
+    def create_learning_example(
+        self,
+        version: str,
+        domain: str,
+        source_chat_id: int | None,
+        source_kind: str,
+        source_tag: str | None,
+        intent_text: str,
+        bad_reply: str | None,
+        better_reply: str,
+        rule_text: str,
+        weight: float,
+        example_hash: str,
+    ) -> LearningExample | None:
+        existing = self.db.scalar(select(LearningExample).where(LearningExample.example_hash == example_hash))
+        if existing is not None:
+            return None
+
+        item = LearningExample(
+            version=version,
+            domain=domain,
+            source_chat_id=source_chat_id,
+            source_kind=source_kind,
+            source_tag=source_tag,
+            intent_text=intent_text,
+            bad_reply=bad_reply,
+            better_reply=better_reply,
+            rule_text=rule_text,
+            weight=weight,
+            example_hash=example_hash,
+        )
+        self.db.add(item)
+        self.db.flush()
+        return item
+
+    def list_learning_examples(self, version: str, domain: str, limit: int = 200) -> list[LearningExample]:
+        return self.db.scalars(
+            select(LearningExample)
+            .where(
+                and_(
+                    LearningExample.enabled.is_(True),
+                    LearningExample.version == version,
+                    LearningExample.domain == domain,
+                )
+            )
+            .order_by(desc(LearningExample.weight), desc(LearningExample.created_at))
+            .limit(limit)
+        ).all()
+
+    def get_latest_learning_version(self) -> str | None:
+        return self.db.scalar(
+            select(LearningExample.version)
+            .where(LearningExample.enabled.is_(True))
+            .order_by(desc(LearningExample.created_at))
+            .limit(1)
+        )
+
+    def count_learning_examples(self, version: str | None = None) -> int:
+        stmt = select(func.count(LearningExample.id)).where(LearningExample.enabled.is_(True))
+        if version:
+            stmt = stmt.where(LearningExample.version == version)
+        return int(self.db.scalar(stmt) or 0)
+
+    def create_learning_reply_usage(
+        self,
+        chat_id: int,
+        external_chat_id: str,
+        learning_version: str | None,
+        examples_count: int,
+    ) -> LearningReplyUsage:
+        item = LearningReplyUsage(
+            chat_id=chat_id,
+            external_chat_id=external_chat_id,
+            learning_version=learning_version,
+            examples_count=examples_count,
+        )
+        self.db.add(item)
+        self.db.flush()
+        return item
+
+    def get_learning_quality_stats(self, version: str, since: datetime) -> dict[str, int]:
+        usage_rows = self.db.scalars(
+            select(LearningReplyUsage.chat_id)
+            .where(
+                and_(
+                    LearningReplyUsage.learning_version == version,
+                    LearningReplyUsage.created_at >= since,
+                    LearningReplyUsage.examples_count > 0,
+                )
+            )
+        ).all()
+        chat_ids = sorted(set(usage_rows))
+        usage_count = len(usage_rows)
+        if not chat_ids:
+            return {
+                "usage_count": usage_count,
+                "chat_count": 0,
+                "leads_count": 0,
+                "feedback_count": 0,
+                "wrong_domain_count": 0,
+            }
+
+        leads_count = self.db.scalar(
+            select(func.count(Lead.id)).where(
+                and_(
+                    Lead.chat_id.in_(chat_ids),
+                    Lead.created_at >= since,
+                )
+            )
+        ) or 0
+        feedback_count = self.db.scalar(
+            select(func.count(FeedbackEvent.id)).where(
+                and_(
+                    FeedbackEvent.chat_id.in_(chat_ids),
+                    FeedbackEvent.created_at >= since,
+                )
+            )
+        ) or 0
+        wrong_domain_count = self.db.scalar(
+            select(func.count(FeedbackEvent.id)).where(
+                and_(
+                    FeedbackEvent.chat_id.in_(chat_ids),
+                    FeedbackEvent.created_at >= since,
+                    FeedbackEvent.tag == "WRONG_DOMAIN",
+                )
+            )
+        ) or 0
+
+        return {
+            "usage_count": int(usage_count),
+            "chat_count": len(chat_ids),
+            "leads_count": int(leads_count),
+            "feedback_count": int(feedback_count),
+            "wrong_domain_count": int(wrong_domain_count),
+        }
+
+    def get_chat_diagnostics(
+        self,
+        external_chat_id: str,
+        message_limit: int = 200,
+        event_limit: int = 200,
+    ) -> dict | None:
+        row = self.db.execute(select(Chat, Ad).join(Ad, Chat.ad_id == Ad.id).where(Chat.external_chat_id == external_chat_id)).first()
+        if row is None:
+            return None
+
+        chat, ad = row
+
+        messages = self.db.scalars(
+            select(Message)
+            .where(Message.chat_id == chat.id)
+            .order_by(Message.created_at.asc())
+            .limit(message_limit)
+        ).all()
+        routing_decisions = self.db.scalars(
+            select(RoutingDecision)
+            .where(RoutingDecision.chat_id == chat.id)
+            .order_by(RoutingDecision.created_at.asc())
+        ).all()
+        bot_replies = self.db.scalars(
+            select(BotReply)
+            .where(BotReply.chat_id == chat.id)
+            .order_by(BotReply.created_at.asc())
+        ).all()
+        leads = self.db.scalars(
+            select(Lead)
+            .where(Lead.chat_id == chat.id)
+            .order_by(Lead.created_at.asc())
+        ).all()
+        feedback_events = self.db.scalars(
+            select(FeedbackEvent)
+            .where(FeedbackEvent.chat_id == chat.id)
+            .order_by(FeedbackEvent.created_at.asc())
+        ).all()
+        event_logs = self.db.scalars(
+            select(EventLog)
+            .where(
+                and_(
+                    EventLog.source == "avito",
+                    EventLog.idempotency_key.like(f"avito:{external_chat_id}:%"),
+                )
+            )
+            .order_by(EventLog.created_at.asc())
+            .limit(event_limit)
+        ).all()
+
+        inbound_count = self.db.scalar(
+            select(func.count(Message.id)).where(
+                and_(
+                    Message.chat_id == chat.id,
+                    Message.direction == MessageDirection.INBOUND.value,
+                )
+            )
+        ) or 0
+        outbound_count = self.db.scalar(
+            select(func.count(Message.id)).where(
+                and_(
+                    Message.chat_id == chat.id,
+                    Message.direction == MessageDirection.OUTBOUND.value,
+                )
+            )
+        ) or 0
+
+        return {
+            "chat": chat,
+            "ad": ad,
+            "messages": list(messages),
+            "routing_decisions": list(routing_decisions),
+            "bot_replies": list(bot_replies),
+            "leads": list(leads),
+            "feedback_events": list(feedback_events),
+            "event_logs": list(event_logs),
+            "inbound_count": int(inbound_count),
+            "outbound_count": int(outbound_count),
+        }
+
     def list_leads(self, limit: int = 100, offset: int = 0) -> list[Lead]:
         return self.db.scalars(
             select(Lead).order_by(desc(Lead.created_at)).limit(limit).offset(offset)
@@ -327,6 +587,7 @@ class Repository:
             ("events_log", EventLog),
             ("feedback_events", FeedbackEvent),
             ("leads", Lead),
+            ("learning_reply_usage", LearningReplyUsage),
         ]:
             result = self.db.execute(delete(model).where(model.created_at < cutoff))
             stats[model_name] = result.rowcount or 0

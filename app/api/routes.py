@@ -8,14 +8,21 @@ from app.core.config import Settings
 from app.db import SessionLocal
 from app.repositories import Repository
 from app.schemas import (
+    BotReplyItem,
     ChatDetailResponse,
+    ChatDiagnosticsResponse,
     ChatListItem,
     ChatMessageItem,
+    EventLogItem,
+    FeedbackEventItem,
     HealthResponse,
     IgnoredLogItem,
+    LearningStatusResponse,
+    LeadItem,
     LeadListItem,
     PromptResponse,
     PromptUpdateRequest,
+    RoutingDecisionItem,
     TelegramWebhookResponse,
 )
 
@@ -38,6 +45,21 @@ def _settings_from_app(app: FastAPI) -> Settings:
 def healthz(request: Request):
     settings = _settings_from_app(request.app)
     return HealthResponse(status="ok", polling_enabled=settings.polling_enabled, environment=settings.environment)
+
+
+@router.get("/api/learning/status", response_model=LearningStatusResponse)
+def learning_status(request: Request, db: Session = Depends(get_db)):
+    status = request.app.state.container.self_learning_service.get_status(db)
+    return LearningStatusResponse(
+        enabled=status.enabled,
+        active_version=status.active_version,
+        stable_version=status.stable_version,
+        candidate_started_at=status.candidate_started_at,
+        last_run_at=status.last_run_at,
+        active_examples=status.active_examples,
+        stable_examples=status.stable_examples,
+        total_examples=status.total_examples,
+    )
 
 
 @router.get("/api/chats", response_model=list[ChatListItem])
@@ -81,6 +103,94 @@ def get_chat(chat_id: int, db: Session = Depends(get_db)):
         messages=[
             ChatMessageItem(id=m.id, direction=m.direction, text=m.text, created_at=m.created_at)
             for m in messages
+        ],
+    )
+
+
+@router.get("/api/chats/external/{external_chat_id}/diagnostics", response_model=ChatDiagnosticsResponse)
+def get_chat_diagnostics(
+    external_chat_id: str,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=200, ge=10, le=1000),
+):
+    repo = Repository(db)
+    data = repo.get_chat_diagnostics(external_chat_id=external_chat_id, message_limit=limit, event_limit=limit)
+    if data is None:
+        raise HTTPException(status_code=404, detail="chat_not_found")
+
+    chat = data["chat"]
+    ad = data["ad"]
+    return ChatDiagnosticsResponse(
+        chat_id=chat.id,
+        external_chat_id=chat.external_chat_id,
+        ad_title=ad.title,
+        ad_url=ad.url,
+        ad_category=ad.category,
+        ad_raw_category=ad.raw_category,
+        domain=chat.domain,
+        state=chat.state,
+        customer_name=chat.customer_name,
+        inbound_count=data["inbound_count"],
+        outbound_count=data["outbound_count"],
+        messages=[
+            ChatMessageItem(id=m.id, direction=m.direction, text=m.text, created_at=m.created_at)
+            for m in data["messages"]
+        ],
+        routing_decisions=[
+            RoutingDecisionItem(
+                id=item.id,
+                domain=item.domain,
+                confidence=item.confidence,
+                decision=item.decision,
+                reason=item.reason,
+                created_at=item.created_at,
+            )
+            for item in data["routing_decisions"]
+        ],
+        bot_replies=[
+            BotReplyItem(
+                id=item.id,
+                prompt_version=item.prompt_version,
+                text=item.text,
+                status=item.status,
+                error=item.error,
+                sent_at=item.sent_at,
+            )
+            for item in data["bot_replies"]
+        ],
+        leads=[
+            LeadItem(
+                id=item.id,
+                contact_raw=item.contact_raw,
+                contact_normalized=item.contact_normalized,
+                summary=item.summary,
+                status=item.status,
+                sent_to_tg_at=item.sent_to_tg_at,
+                created_at=item.created_at,
+            )
+            for item in data["leads"]
+        ],
+        feedback_events=[
+            FeedbackEventItem(
+                id=item.id,
+                tag=item.tag,
+                comment=item.comment,
+                created_at=item.created_at,
+            )
+            for item in data["feedback_events"]
+        ],
+        event_logs=[
+            EventLogItem(
+                id=item.id,
+                source=item.source,
+                event_type=item.event_type,
+                idempotency_key=item.idempotency_key,
+                status=item.status,
+                error_message=item.error_message,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            for item in data["event_logs"]
         ],
     )
 
@@ -208,12 +318,18 @@ def admin_page():
       <h2>Ignored Logs</h2>
       <pre id='ignored'>loading...</pre>
     </div>
+    <div class='block'>
+      <h2>Learning Status</h2>
+      <pre id='learning'>loading...</pre>
+    </div>
     <script>
       async function load() {
         const prompt = await fetch('/api/prompts/real-estate').then(r => r.json());
         document.getElementById('prompt').textContent = JSON.stringify(prompt, null, 2);
         const ignored = await fetch('/api/logs/ignored?limit=20').then(r => r.json());
         document.getElementById('ignored').textContent = JSON.stringify(ignored, null, 2);
+        const learning = await fetch('/api/learning/status').then(r => r.json());
+        document.getElementById('learning').textContent = JSON.stringify(learning, null, 2);
       }
       load();
     </script>

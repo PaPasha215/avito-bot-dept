@@ -5,6 +5,8 @@ import time
 from collections.abc import Callable
 from typing import TypeVar
 
+import httpx
+
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,11 @@ def with_retry(action: Callable[[], T], name: str, attempts: int = 3, base_sleep
         try:
             return action()
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                # 4xx errors (except 429) are usually deterministic and should not be retried.
+                if 400 <= status_code < 500 and status_code != 429:
+                    raise
             last_error = exc
             if idx == attempts:
                 break

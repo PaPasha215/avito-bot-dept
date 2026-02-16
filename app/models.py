@@ -115,6 +115,36 @@ class EventLog(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class LearningExample(Base):
+    __tablename__ = "learning_examples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[str] = mapped_column(String(64), index=True)
+    domain: Mapped[str] = mapped_column(String(64), default="REAL_ESTATE", index=True)
+    source_chat_id: Mapped[int | None] = mapped_column(ForeignKey("chats.id"), nullable=True, index=True)
+    source_kind: Mapped[str] = mapped_column(String(32))  # SUCCESS | FAIL
+    source_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    intent_text: Mapped[str] = mapped_column(Text)
+    bad_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
+    better_reply: Mapped[str] = mapped_column(Text)
+    rule_text: Mapped[str] = mapped_column(Text)
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    example_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LearningReplyUsage(Base):
+    __tablename__ = "learning_reply_usage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id"), index=True)
+    external_chat_id: Mapped[str] = mapped_column(String(128), index=True)
+    learning_version: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    examples_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Setting(Base):
     __tablename__ = "settings"
 

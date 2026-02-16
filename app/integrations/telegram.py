@@ -32,7 +32,19 @@ class TelegramClient:
             logger.warning("Telegram disabled, message skipped")
             return
         resp = self._client.post(self._method_url("sendMessage"), json={"chat_id": chat_id, "text": text})
-        resp.raise_for_status()
+        if resp.is_error:
+            detail = resp.text
+            try:
+                payload = resp.json()
+                if isinstance(payload, dict):
+                    detail = str(payload.get("description") or payload)
+            except ValueError:
+                pass
+            raise httpx.HTTPStatusError(
+                f"Telegram sendMessage failed ({resp.status_code}): {detail}",
+                request=resp.request,
+                response=resp,
+            )
 
     def send_lead_card(
         self,

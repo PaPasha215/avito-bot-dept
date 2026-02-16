@@ -57,6 +57,7 @@ class IncomingEvent:
     created_at: datetime
     ad_context: AdContext
     customer_name: str | None = None
+    counterparty_user_id: int | None = None
 
 
 @dataclass(slots=True)

@@ -17,7 +17,43 @@
 - VPS-шаблоны: Caddy + PostgreSQL compose.
 - Базовые тесты роутера и лид-детектора.
 - CLI и Makefile для validate-env/poll-once/run.
+- Diagnostic endpoint `GET /api/chats/external/{external_chat_id}/diagnostics` for incident triage.
+- CLI command `chat-diagnostics` and Make target `make chat-diagnostics CHAT_ID=...`.
+- Self-learning v1:
+  - table `learning_examples` for learned rules/replies;
+  - table `learning_reply_usage` for tracking applied learning version;
+  - CLI commands `learn-once`, `learning-status`;
+  - API endpoint `GET /api/learning/status`;
+  - auto-run cycle from poller by configurable interval.
+- Jino VPS deployment support:
+  - guide `docs/DEPLOY_JINO.md`;
+  - SQLite -> PostgreSQL migration script `scripts/migrate_sqlite_to_postgres.py`;
+  - Make target `migrate-sqlite-to-postgres`.
+
+### Changed
+- Avito polling switched to `GET /messenger/v2/accounts/{user_id}/chats` with normalization of `last_message`.
+- Added chat-history fallback for burst ingestion:
+  - primary `GET /messenger/v3/.../messages`
+  - fallback `GET /messenger/v1/.../messages` when v3 returns 402/404/405.
+- Added retry guard: deterministic 4xx errors (except 429) are not retried.
+- Avito text send payload aligned with official OpenAPI messenger schema:
+  - `{"type":"text","message":{"text":"..."}}`
+- Lead pipeline hardened: failures on summary/Telegram no longer fail whole event after reply was sent to Avito.
+- Telegram errors now include API `description` in exception text for faster diagnosis.
+- Message generation now supports prompt augmentation with learned examples (few-shot context).
+- Canary learning rollout added (`active/stable`) with KPI-based rollback/promotion.
 
 ### Notes
 - Интеграция Avito зависит от корректных endpoint URL/параметров в `.env`.
 - На этапе MVP авто/прочие категории не обслуживаются.
+- Подтверждено по runtime (16 Feb 2026): Avito send endpoint отвечает `200 OK` после обновления payload.
+- Подтверждено по runtime (16 Feb 2026, Jino VPS):
+  - прод-контур `app+db+caddy` поднят на домене `avito-bot-prod.woo.autos`;
+  - TLS выпущен автоматически;
+  - SQLite -> PostgreSQL миграция выполнена (280 строк);
+  - выявлен блокер: OpenAI c VPS возвращает `403 unsupported_country_region_territory`.
+- Подтверждено по runtime (17 Feb 2026, Jino VPS):
+  - LLM-маршрут переключен на OpenRouter (`OPENAI_BASE_URL=https://openrouter.ai/api/v1`);
+  - модель: `openai/gpt-4o-mini`;
+  - polling включен обратно;
+  - прямой тест `chat/completions` с VPS вернул `HTTP 200`.

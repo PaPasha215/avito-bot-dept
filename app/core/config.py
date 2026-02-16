@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     classifier_confidence_threshold: float = 0.80
     max_recent_messages_for_classification: int = 6
     max_recent_messages_for_reply: int = 10
+    self_learning_enabled: bool = True
+    self_learning_lookback_days: int = 7
+    self_learning_interval_hours: int = 24
+    self_learning_max_source_chats: int = 300
+    self_learning_max_examples_per_run: int = 500
+    self_learning_examples_per_prompt: int = 3
+    self_learning_canary_percent: int = 20
+    self_learning_rollback_wrong_domain_threshold: int = 1
+    self_learning_promote_min_leads: int = 3
 
     avito_client_id: str | None = None
     avito_client_secret: str | None = None
@@ -56,6 +65,8 @@ class Settings(BaseSettings):
     avito_updates_url: str | None = None
     avito_chat_context_url_template: str | None = None
     avito_send_message_url_template: str | None = None
+    avito_messages_url_template: str | None = "https://api.avito.ru/messenger/v3/accounts/{user_id}/chats/{chat_id}/messages/"
+    avito_messages_fallback_url_template: str | None = "https://api.avito.ru/messenger/v1/accounts/{user_id}/chats/{chat_id}/messages/"
     avito_poll_limit: int = 50
     avito_request_timeout_seconds: int = 20
 

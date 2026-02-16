@@ -28,3 +28,45 @@
 1. Ответы по авто/прочим категориям.
 2. Полная CRM-интерфейсная часть.
 3. Реализация интеграций Юла/Яндекс.Недвижимость.
+
+## Текущий статус интеграций (обновлено 2026-02-16)
+1. Avito OAuth: работает.
+2. Avito polling (`/messenger/v2/.../chats`): работает.
+3. Avito send message (`/messenger/v1/.../messages`): работает с payload `type=text + message.text`.
+4. Telegram leads: работает при корректном `TELEGRAM_LEADS_CHAT_ID` и доступе бота к чату.
+5. Burst ingestion: включена догрузка истории (`v3/messages`) с fallback на `v1/messages` для чатов, где `v3` отдает `402/404/405`.
+6. Для инцидентов доступна диагностика чата через API/CLI (`/api/chats/external/{external_chat_id}/diagnostics`, `make chat-diagnostics`).
+7. Self-learning v1 включен:
+   - автозапуск при работающем poller раз в `SELF_LEARNING_INTERVAL_HOURS`;
+   - команда запуска цикла: `make learn-once`;
+   - статус: `make learning-status` или `GET /api/learning/status`;
+   - создаются версии обучающих примеров;
+   - в ответы подмешиваются релевантные примеры по canary-схеме.
+8. Подготовлен путь переноса на Jino VPS:
+   - пошаговый гайд `docs/DEPLOY_JINO.md`;
+   - скрипт миграции `scripts/migrate_sqlite_to_postgres.py`.
+
+## Статус Jino VPS (обновлено 2026-02-16 23:05 UTC+5)
+1. Прод-контур на Jino поднят:
+   - сервер: `85.239.56.40`;
+   - стек: `app + db + caddy`;
+   - домен: `https://avito-bot-prod.woo.autos`.
+2. TLS выпущен автоматически (Let's Encrypt), `GET /healthz` по домену возвращает `status=ok`.
+3. Перенос данных в PostgreSQL выполнен:
+   - источник: `sqlite:////app/data/app.db`;
+   - назначение: `postgresql+psycopg://avito_ai:***@db:5432/avito_ai`;
+   - перенесено: `280` строк.
+4. Выявленный блокер №1 (критический):
+   - OpenAI с этого VPS отвечает `403 unsupported_country_region_territory`;
+   - итог: генерация ответов LLM невозможна без смены egress/провайдера.
+5. Выявленный блокер №2 (частичный):
+   - часть Avito chat-history вызовов возвращает `402 Payment Required` по `v3/messages`;
+   - fallback на `v1/messages` для этих чатов также может быть ограничен (`405`);
+   - итог: в таких чатах иногда доступно только последнее сообщение из `v2/chats`.
+
+## Обновление LLM-шлюза (2026-02-17 01:45 UTC+5)
+1. Для обхода регионального `403` OpenAI на Jino VPS сервис переведен на OpenRouter:
+   - `OPENAI_BASE_URL=https://openrouter.ai/api/v1`
+   - `OPENAI_MODEL=openai/gpt-4o-mini`
+2. Ключ OpenRouter добавлен в `.env`, polling включен обратно (`POLLING_ENABLED=true`).
+3. Прямой тест с VPS к `chat/completions` успешен (`HTTP 200`), маршрут LLM восстановлен.
