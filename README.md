@@ -27,6 +27,12 @@ pip install -e .
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+Либо через helper-script:
+
+```bash
+./scripts/run_local.sh
+```
+
 ## Обязательные переменные `.env` для рабочего контура
 
 - `OPENAI_API_KEY`
@@ -47,6 +53,14 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 docker compose up --build
+```
+
+## Полезные команды
+
+```bash
+make validate-env
+make poll-once
+make run
 ```
 
 ## Основные endpoints

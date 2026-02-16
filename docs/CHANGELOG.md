@@ -16,6 +16,7 @@
 - Dockerfile и docker-compose.
 - VPS-шаблоны: Caddy + PostgreSQL compose.
 - Базовые тесты роутера и лид-детектора.
+- CLI и Makefile для validate-env/poll-once/run.
 
 ### Notes
 - Интеграция Avito зависит от корректных endpoint URL/параметров в `.env`.

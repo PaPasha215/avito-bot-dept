@@ -3,7 +3,11 @@
 ## Локальный запуск
 1. Скопировать `.env.example` в `.env`.
 2. Указать ключи Avito/OpenAI/Telegram.
-3. Запустить: `docker compose up --build` или `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+3. Проверить env: `make validate-env`.
+4. Запустить: `docker compose up --build` или `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+
+### Одноразовый цикл poller для диагностики
+- `make poll-once`
 
 ## Проверка health
 - `GET /healthz` должен вернуть `status=ok`.
