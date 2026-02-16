@@ -1,0 +1,41 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: avito-ai-assistant
+    env_file:
+      - ../.env
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    container_name: avito-ai-db
+    environment:
+      POSTGRES_DB: avito_ai
+      POSTGRES_USER: avito_ai
+      POSTGRES_PASSWORD: avito_ai_change_me
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: avito-ai-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  caddy_data:
+  caddy_config:
