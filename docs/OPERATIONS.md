@@ -93,18 +93,20 @@
 - `/Users/home/Documents/Bot/app/services/processor.py`
 и затем деплой обычным способом.
 
-## Ежедневный отчет по статистике объявлений
+## Weekly-отчет по статистике объявлений
 1. Включить в `.env`:
    - `STATS_REPORTING_ENABLED=true`
    - `TELEGRAM_STATS_CHAT_ID=<id целевого чата>` (или fallback на `TELEGRAM_QA_CHAT_ID` / `TELEGRAM_LEADS_CHAT_ID`)
 2. Базовые параметры:
-   - `STATS_REPORT_INTERVAL_HOURS=24`
-   - `STATS_REPORT_LOOKBACK_DAYS=14`
+   - `STATS_REPORT_WEEKDAY=1` (понедельник)
+   - `STATS_REPORT_HOUR=9`
+   - `STATS_REPORT_MINUTE=0`
+   - `STATS_REPORT_TIMEZONE=Asia/Yekaterinburg`
    - `STATS_REPORT_MIN_VIEWS_FOR_CONVERSION=30`
    - `STATS_REPORT_LOW_CONVERSION_THRESHOLD=3.5`
 3. Проверка вручную:
    - `make stats-report-once`
-4. В автомате отчет запускается в процессе poller раз в заданный интервал.
+4. В автомате отчет запускается в процессе poller один раз в неделю по расписанию.
 
 ## Перенос на VPS (Beget)
 1. Создать сервер и установить Docker/Compose.

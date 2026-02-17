@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -56,22 +57,29 @@ class StatsReportingService:
             return None
 
         repo = Repository(db)
-        now = utcnow()
-        last_run = self._parse_dt(repo.get_setting(self.LAST_RUN_KEY))
-        if last_run is not None and (now - last_run) < timedelta(hours=max(1, self.settings.stats_report_interval_hours)):
+        now_utc = self._now_utc()
+        now_local = self._to_local(now_utc)
+        scheduled_at = self._scheduled_datetime_for_week(now_local.date())
+        if now_local < scheduled_at:
             return None
 
-        result = self.report_once(db)
-        repo.set_setting(self.LAST_RUN_KEY, now.isoformat())
+        last_run = self._parse_dt(repo.get_setting(self.LAST_RUN_KEY))
+        if last_run is not None:
+            last_local = self._to_local(last_run)
+            if last_local >= scheduled_at:
+                return None
+
+        result = self.report_once(db, anchor_local_date=now_local.date())
+        repo.set_setting(self.LAST_RUN_KEY, now_utc.isoformat())
         db.commit()
         return result
 
-    def report_once(self, db: Session) -> StatsReportRunResult:
+    def report_once(self, db: Session, anchor_local_date: date | None = None) -> StatsReportRunResult:
         target_chat_id = self._resolve_target_chat_id()
         if not target_chat_id:
             logger.info("Stats report skipped: target Telegram chat is not configured")
             return StatsReportRunResult(
-                report_date=utcnow().date().isoformat(),
+                report_date=self._now_utc().date().isoformat(),
                 sent=False,
                 target_chat_id=None,
                 items_total=0,
@@ -80,8 +88,8 @@ class StatsReportingService:
                 low_conversion_count=0,
             )
 
-        report_date_to = utcnow().date()
-        report_date_from = report_date_to - timedelta(days=max(1, self.settings.stats_report_lookback_days - 1))
+        anchor_date = anchor_local_date or self._to_local(self._now_utc()).date()
+        report_date_from, report_date_to = self._previous_week_range(anchor_date)
         raw = self.avito_client.get_item_analytics(
             date_from=report_date_from.isoformat(),
             date_to=report_date_to.isoformat(),
@@ -102,6 +110,7 @@ class StatsReportingService:
         )
         items = self._parse_items(raw)
         items = self._enrich_items(items)
+        items = self._filter_real_estate_items(items)
 
         text, top_reach_count, top_conv_count, low_conv_count = self._build_report_text(
             items=items,
@@ -165,11 +174,20 @@ class StatsReportingService:
             enriched.extend(items[len(enriched):])
         return enriched
 
+    def _filter_real_estate_items(self, items: list[StatsItem]) -> list[StatsItem]:
+        result: list[StatsItem] = []
+        for item in items:
+            if not item.url:
+                continue
+            if self._is_real_estate_url(item.url):
+                result.append(item)
+        return result
+
     def _build_report_text(
         self,
         items: list[StatsItem],
-        date_from: datetime.date,
-        date_to: datetime.date,
+        date_from: date,
+        date_to: date,
     ) -> tuple[str, int, int, int]:
         reach = sorted(items, key=lambda x: x.views, reverse=True)[:5]
         conv_candidates = [x for x in items if x.views >= self.settings.stats_report_min_views_for_conversion]
@@ -180,18 +198,18 @@ class StatsReportingService:
         )[:5]
 
         lines = [
-            "Отчет Avito: объявления",
+            "Еженедельный отчет Avito по объявлениям недвижимости",
             f"Период: {date_from.isoformat()} — {date_to.isoformat()}",
             f"Объявлений в выборке: {len(items)}",
             "",
-            "1) Топ по охвату (views):",
+            "1) Топ по охвату (просмотры):",
         ]
         if not reach:
             lines.append("- Нет данных")
         for idx, item in enumerate(reach, start=1):
             lines.append(
-                f"{idx}. #{item.item_id} | views {int(item.views)} | contacts {int(item.contacts)} | "
-                f"conv {item.conversion:.2f}% | fav {int(item.favorites)} | status {item.status or '-'}"
+                f"{idx}. #{item.item_id} | просмотры {int(item.views)} | контакты {int(item.contacts)} | "
+                f"конверсия {item.conversion:.2f}% | избранное {int(item.favorites)} | статус {item.status or '-'}"
             )
             if item.url:
                 lines.append(f"   {item.url}")
@@ -201,17 +219,17 @@ class StatsReportingService:
             lines.append("- Нет данных")
         for idx, item in enumerate(conversion, start=1):
             lines.append(
-                f"{idx}. #{item.item_id} | conv {item.conversion:.2f}% | views {int(item.views)} | contacts {int(item.contacts)}"
+                f"{idx}. #{item.item_id} | конверсия {item.conversion:.2f}% | просмотры {int(item.views)} | контакты {int(item.contacts)}"
             )
             if item.url:
                 lines.append(f"   {item.url}")
 
-        lines.extend(["", "3) Кандидаты на переработку (много views, низкая conv):"])
+        lines.extend(["", "3) Кандидаты на переработку (много просмотров, низкая конверсия):"])
         if not low_conv:
             lines.append("- Нет явных кандидатов")
         for idx, item in enumerate(low_conv, start=1):
             lines.append(
-                f"{idx}. #{item.item_id} | views {int(item.views)} | conv {item.conversion:.2f}% | contacts {int(item.contacts)}"
+                f"{idx}. #{item.item_id} | просмотры {int(item.views)} | конверсия {item.conversion:.2f}% | контакты {int(item.contacts)}"
             )
             if item.url:
                 lines.append(f"   {item.url}")
@@ -219,13 +237,59 @@ class StatsReportingService:
         lines.extend(
             [
                 "",
-                "Рекомендации на сегодня:",
+                "Рекомендации на неделю:",
                 "- Для карточек из блока 3: переписать 1-2 первые строки описания с ценой, сроком и форматом заселения.",
                 "- Проверить главное фото и заголовок: формат + выгода + цена.",
-                "- Для лидеров из блока 2 сделать 2-3 похожих варианта объявлений (A/B заголовки).",
+                "- Для лидеров из блока 2 сделать 2-3 похожих варианта объявлений с разными заголовками.",
             ]
         )
         return "\n".join(lines), len(reach), len(conversion), len(low_conv)
+
+    def _scheduled_datetime_for_week(self, local_date: date) -> datetime:
+        week_start = local_date - timedelta(days=local_date.weekday())
+        day_offset = max(0, min(6, self.settings.stats_report_weekday - 1))
+        day = week_start + timedelta(days=day_offset)
+        run_time = time(
+            hour=max(0, min(23, self.settings.stats_report_hour)),
+            minute=max(0, min(59, self.settings.stats_report_minute)),
+        )
+        return datetime.combine(day, run_time, tzinfo=self._tzinfo())
+
+    @staticmethod
+    def _previous_week_range(anchor_date: date) -> tuple[date, date]:
+        current_week_start = anchor_date - timedelta(days=anchor_date.weekday())
+        previous_week_start = current_week_start - timedelta(days=7)
+        previous_week_end = current_week_start - timedelta(days=1)
+        return previous_week_start, previous_week_end
+
+    def _to_local(self, dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(self._tzinfo())
+
+    def _tzinfo(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.settings.stats_report_timezone)
+        except Exception:  # noqa: BLE001
+            return ZoneInfo("UTC")
+
+    @staticmethod
+    def _is_real_estate_url(url: str) -> bool:
+        url_lower = url.lower()
+        return any(
+            marker in url_lower
+            for marker in (
+                "/komnaty/",
+                "/kvartiry/",
+                "/doma_dachi_kottedzhi/",
+                "/kommercheskaya_nedvizhimost/",
+                "/zemelnye_uchastki/",
+                "/nedvizhimost/",
+            )
+        )
+
+    def _now_utc(self) -> datetime:
+        return utcnow()
 
     @staticmethod
     def _parse_dt(value: str | None) -> datetime | None:

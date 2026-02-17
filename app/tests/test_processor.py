@@ -211,3 +211,28 @@ def test_processor_first_reply_is_soft_and_contextual(db_session):
     reply = avito.sent_messages[-1][1].lower()
     assert "заселения сейчас актуален" in reply
     assert "койко-мест" in reply
+
+
+def test_processor_first_reply_skips_redundant_actuality_for_explicit_settlement_intent(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    processor, avito, telegram, openai = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-intent-1",
+        chat_id="chat-intent",
+        message_id="msg-intent-1",
+        sender_type="user",
+        text="Здравствуйте, можно снять всю комнату на воскресенье за 800р?",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-intent", title="Койко-место 20 м2", category="Недвижимость"),
+        customer_name="Сергей",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert telegram.leads_sent == 0
+    assert openai.reply_calls == 0
+
+    reply = avito.sent_messages[-1][1].lower()
+    assert "актуален" not in reply
+    assert "сколько человек" in reply

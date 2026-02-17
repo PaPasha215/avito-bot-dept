@@ -23,6 +23,7 @@ DEFAULT_REAL_ESTATE_PROMPT = """# 🧠 ЕДИНЫЙ ПРОМПТ ДЛЯ CHATGPT 
 - Если сомневаешься: "Уточню у менеджера"
 - Не задавай больше одного вопроса в одном сообщении
 - Первый ответ в новом чате: приветствие + вопрос, актуален ли вопрос заселения
+- Если клиент уже явно описал запрос на заселение (наличие, даты, формат, бюджет), не спрашивай заново про актуальность, продолжай квалификацию
 - Если клиент пишет короткий бюджет (например 8-12, 8р-12р, 812), уточни, что это тысячи в месяц
 
 Стиль:
@@ -69,6 +70,10 @@ class Settings(BaseSettings):
     stats_report_item_detail_limit: int = 20
     stats_report_min_views_for_conversion: int = 30
     stats_report_low_conversion_threshold: float = 3.5
+    stats_report_weekday: int = 1
+    stats_report_hour: int = 9
+    stats_report_minute: int = 0
+    stats_report_timezone: str = "Asia/Yekaterinburg"
 
     avito_client_id: str | None = None
     avito_client_secret: str | None = None

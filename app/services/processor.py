@@ -47,6 +47,22 @@ class MessageProcessor:
         re.IGNORECASE,
     )
     COMPACT_NUMBER_RE = re.compile(r"(?<!\d)(\d{3,4})(?!\d)")
+    SETTLEMENT_INTENT_RE = re.compile(
+        r"(хочу\s+засел|засел|свободн|снять|аренд|койко|комнат|хостел|квартир|места|заехать|на\s+\d{1,2}\.?[./-]\d{1,2})",
+        re.IGNORECASE,
+    )
+    DATE_INTENT_RE = re.compile(
+        r"(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|сегодня|завтра|послезавтра|воскресенье|понедельник|вторник|среда|четверг|пятница|суббота|на\s+неделе)",
+        re.IGNORECASE,
+    )
+    PEOPLE_INTENT_RE = re.compile(
+        r"(\b\d+\s*(?:чел|человек|гост|чел\.)\b|двое|трое|четверо|пара|семья)",
+        re.IGNORECASE,
+    )
+    FULL_ROOM_RE = re.compile(
+        r"(всю\s+комнат|оба\s+койк|целиком|полностью\s+комнат)",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -466,7 +482,15 @@ class MessageProcessor:
                 return f"Простите, вы имеете в виду {left} тысяч рублей за проживание в месяц?"
             return f"Простите, вы имеете в виду {left}–{right} тысяч рублей за проживание в месяц?"
 
+        explicit_intent = self._has_explicit_settlement_intent(latest_inbound)
+        if explicit_intent and not has_contact and self._is_deflective_last_outbound(history_messages):
+            followup = self._build_qualification_followup(latest_inbound)
+            return f"Понял вас. {followup}"
+
         if self._is_first_bot_reply(history_messages) and not has_contact:
+            if explicit_intent:
+                followup = self._build_qualification_followup(latest_inbound)
+                return f"Здравствуйте! {followup}"
             focus = self._detect_ad_focus(ad_title=ad_title, ad_category=ad_category)
             if focus:
                 return f"Здравствуйте! Помогу по объявлению о {focus}. Подскажите, пожалуйста, вопрос заселения сейчас актуален?"
@@ -483,11 +507,17 @@ class MessageProcessor:
     ) -> str:
         focus = self._detect_ad_focus(ad_title=ad_title, ad_category=ad_category) or "проживании"
         is_first_reply = self._is_first_bot_reply(history_messages)
+        latest_inbound = self._latest_inbound_text(history_messages)
+        explicit_intent = self._has_explicit_settlement_intent(latest_inbound)
 
         stage_rule = (
-            "Это первый ответ в чате: сначала поприветствуй и задай только один вопрос про актуальность заселения."
-            if is_first_reply
-            else "Это продолжение диалога: задавай только один следующий уточняющий вопрос и не делай длинных сообщений."
+            "Это первый ответ и клиент уже сформулировал запрос на заселение: не спрашивай заново про актуальность, сразу продолжай квалификацию."
+            if is_first_reply and explicit_intent
+            else (
+                "Это первый ответ в чате: сначала поприветствуй и задай только один вопрос про актуальность заселения."
+                if is_first_reply
+                else "Это продолжение диалога: задавай только один следующий уточняющий вопрос и не делай длинных сообщений."
+            )
         )
 
         runtime_rules = (
@@ -499,6 +529,8 @@ class MessageProcessor:
             "- Если объявление про койко-место, не переключайся на другие форматы без прямого запроса клиента.\n"
             "- Если тип размещения неочевиден, задай один короткий уточняющий вопрос.\n"
             "- Не задавай более одного вопроса в одном сообщении.\n"
+            "- Если клиент уже явно просит заселение/наличие/даты, не переспрашивай «актуально ли».\n"
+            "- Не завершай диалог фразой «уточню у менеджера» без попытки собрать недостающие данные и контакт.\n"
             f"- {stage_rule}\n"
         )
         return f"{base_prompt}{runtime_rules}"
@@ -634,3 +666,46 @@ class MessageProcessor:
         if "семейн" in combined:
             return "семейном номере"
         return None
+
+    def _has_explicit_settlement_intent(self, text: str) -> bool:
+        return bool(text and self.SETTLEMENT_INTENT_RE.search(text))
+
+    def _has_date_signal(self, text: str) -> bool:
+        return bool(text and self.DATE_INTENT_RE.search(text))
+
+    def _has_people_signal(self, text: str) -> bool:
+        return bool(text and self.PEOPLE_INTENT_RE.search(text))
+
+    def _has_budget_signal(self, text: str) -> bool:
+        return bool(text and (self.CURRENCY_RE.search(text) or re.search(r"\b\d{3,6}\b", text)))
+
+    def _build_qualification_followup(self, text: str) -> str:
+        normalized = " ".join((text or "").lower().split())
+        wants_full_room = bool(self.FULL_ROOM_RE.search(normalized))
+        has_date = self._has_date_signal(normalized)
+        has_people = self._has_people_signal(normalized)
+        has_budget = self._has_budget_signal(normalized)
+
+        if not has_date:
+            return "Подскажите, пожалуйста, на какие даты планируете заселение?"
+        if not has_people:
+            return "Подскажите, пожалуйста, сколько человек планируете разместить?"
+        if not has_budget:
+            return "Подскажите, пожалуйста, какой ориентир по бюджету у вас на сутки или на месяц?"
+        if wants_full_room:
+            return (
+                "Принял, рассматриваете размещение всей комнаты. "
+                "Чтобы сразу зафиксировать запрос у менеджера, оставьте, пожалуйста, номер телефона или мессенджер."
+            )
+        return "Чтобы быстрее подобрать вариант и подтвердить наличие, оставьте, пожалуйста, номер телефона или мессенджер."
+
+    def _is_deflective_last_outbound(self, history_messages: list) -> bool:
+        last_outbound = self._last_outbound_text(history_messages).lower()
+        if not last_outbound:
+            return False
+        return bool(
+            "уточню у менеджера" in last_outbound
+            or "ожидайте" in last_outbound
+            or "скоро свяжусь" in last_outbound
+            or "скоро с вами свяжусь" in last_outbound
+        )

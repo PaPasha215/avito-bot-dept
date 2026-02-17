@@ -19,7 +19,7 @@
 7. `MessageProcessor`: оркестрация полного цикла.
 8. `Poller`: периодический запуск цикла каждые 10 секунд.
 9. `SelfLearningService`: генерация обучающих примеров + canary/promotion/rollback.
-10. `StatsReportingService`: агрегирует статистику объявлений через Avito `stats/v2` и отправляет ежедневный Telegram-отчет.
+10. `StatsReportingService`: агрегирует статистику объявлений через Avito `stats/v2` и отправляет weekly Telegram-отчет по расписанию.
 
 ## Avito API (актуализировано 2026-02-16)
 - Список API берется из `https://developers.avito.ru/web/1/openapi/list`.
@@ -54,9 +54,11 @@
    - при ошибке summary/Telegram основной event не фейлится, чтобы избежать дублей ответа в Avito.
 7. Фоновая аналитика:
    - `StatsReportingService.run_if_due()` запускается после poll-цикла;
-   - запрашивает `stats/v2` по объявлениям;
-   - дополнительно подтягивает мета по item (`core/v1/accounts/{user_id}/items/{item_id}/`);
-   - отправляет компактный отчет в Telegram.
+   - при наступлении расписания (понедельник 09:00, локальный TZ) отправляет 1 отчет за неделю;
+   - период отчета: предыдущая календарная неделя (пн-вс);
+   - данные: `stats/v2` + мета item (`core/v1/accounts/{user_id}/items/{item_id}/`);
+   - фильтрация: только объявления недвижимости;
+   - отправляет отчет в Telegram на русском языке.
 
 ## API
 - `GET /healthz`
