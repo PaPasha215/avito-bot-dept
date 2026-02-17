@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     classifier_confidence_threshold: float = 0.80
     max_recent_messages_for_classification: int = 6
     max_recent_messages_for_reply: int = 10
+    reply_delay_seconds: int = 0
     self_learning_enabled: bool = True
     self_learning_lookback_days: int = 7
     self_learning_interval_hours: int = 24

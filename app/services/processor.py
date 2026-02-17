@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -274,7 +275,7 @@ class MessageProcessor:
                 response_text = self._trim_sentences(response_text, max_sentences=4)
 
             with_retry(
-                lambda: self.avito_client.send_message(chat_id=event.chat_id, text=response_text),
+                lambda: self._send_with_delay(chat_id=event.chat_id, text=response_text),
                 name="avito_send_message",
                 attempts=3,
             )
@@ -429,6 +430,12 @@ class MessageProcessor:
         if any(token in value for token in ["авто", "машин", "транспорт", "автомоб"]):
             return "AUTO"
         return "OTHER"
+
+    def _send_with_delay(self, chat_id: str, text: str) -> None:
+        delay = max(0, int(self.settings.reply_delay_seconds))
+        if delay > 0:
+            time.sleep(delay)
+        self.avito_client.send_message(chat_id=chat_id, text=text)
 
     def _build_rule_based_reply(
         self,
