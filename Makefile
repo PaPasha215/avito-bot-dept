@@ -1,4 +1,4 @@
-.PHONY: run poll-once learn-once learning-status validate-env chat-diagnostics migrate-sqlite-to-postgres test compile docker-up
+.PHONY: run poll-once learn-once learning-status stats-report-once validate-env chat-diagnostics migrate-sqlite-to-postgres test compile docker-up
 
 run:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -11,6 +11,9 @@ learn-once:
 
 learning-status:
 	python3 -m app.cli learning-status
+
+stats-report-once:
+	python3 -m app.cli stats-report-once
 
 validate-env:
 	python3 -m app.cli validate-env

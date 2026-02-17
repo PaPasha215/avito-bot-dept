@@ -58,8 +58,9 @@ class TelegramClient:
         context_lines: list[str],
         status: LeadStatus = LeadStatus.NEW,
     ) -> None:
+        summary_compact = self._trim_text(summary, limit=700)
         lines = [
-            f"Заявка Avito #{lead_id}",
+            f"Лид Avito #{lead_id}",
             "",
             f"Объявление: {ad_title}",
         ]
@@ -73,12 +74,19 @@ class TelegramClient:
                 f"Статус: {status.value}",
                 "",
                 "Summary:",
-                summary,
+                summary_compact,
                 "",
                 "Последние реплики:",
             ]
         )
-        for item in context_lines[-5:]:
-            lines.append(f"- {item}")
+        for item in context_lines[-3:]:
+            lines.append(f"- {self._trim_text(item, limit=220)}")
 
         self.send_message(leads_chat_id, "\n".join(lines))
+
+    @staticmethod
+    def _trim_text(text: str, limit: int) -> str:
+        compact = " ".join((text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 1].rstrip() + "…"

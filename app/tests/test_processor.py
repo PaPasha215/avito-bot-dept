@@ -4,13 +4,14 @@ from datetime import datetime, timezone
 
 from app.core.config import Settings
 from app.models import Lead, RoutingDecision
+from app.repositories import Repository
 from app.services.classifier import DomainClassifier
 from app.services.cleanup import RetentionService
 from app.services.lead_detector import LeadDetector
 from app.services.processor import MessageProcessor
 from app.services.prompt_service import PromptService
 from app.services.router import RouterService
-from app.types import AdContext, IncomingEvent
+from app.types import AdContext, IncomingEvent, MessageDirection
 
 
 class DummyAvito:
@@ -27,7 +28,15 @@ class DummyAvito:
 class DummyOpenAI:
     enabled = False
 
+    def __init__(self):
+        self.reply_calls = 0
+        self.last_system_prompt = ""
+        self.last_chat_history: list[dict] = []
+
     def generate_reply(self, system_prompt: str, chat_history: list[dict]) -> str:
+        self.reply_calls += 1
+        self.last_system_prompt = system_prompt
+        self.last_chat_history = chat_history
         return "Здравствуйте! Подскажите, пожалуйста, номер телефона или мессенджер?"
 
     def summarize_lead(self, ad_title: str, contact_raw: str, transcript: list[str]) -> str:
@@ -55,15 +64,16 @@ def build_processor(settings: Settings):
         router_service=router,
         prompt_service=PromptService(settings=settings),
         self_learning_service=None,
+        stats_reporting_service=None,
         lead_detector=LeadDetector(),
         retention_service=RetentionService(),
     )
-    return processor, avito, telegram
+    return processor, avito, telegram, openai
 
 
 def test_processor_ignores_auto_category(db_session):
     settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
-    processor, avito, telegram = build_processor(settings)
+    processor, avito, telegram, _ = build_processor(settings)
 
     event = IncomingEvent(
         event_id="evt-1",
@@ -88,7 +98,7 @@ def test_processor_ignores_auto_category(db_session):
 
 def test_processor_creates_lead_on_contact(db_session):
     settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
-    processor, avito, telegram = build_processor(settings)
+    processor, avito, telegram, openai = build_processor(settings)
 
     event = IncomingEvent(
         event_id="evt-2",
@@ -105,7 +115,99 @@ def test_processor_creates_lead_on_contact(db_session):
     assert outcome == "lead"
     assert len(avito.sent_messages) == 1
     assert telegram.leads_sent == 1
+    assert openai.reply_calls == 1
+    assert "Заголовок объявления: Койко-место" in openai.last_system_prompt
 
     leads = db_session.query(Lead).all()
     assert len(leads) == 1
     assert leads[0].contact_normalized == "+79992182468"
+
+
+def test_processor_clarifies_short_budget_range(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    processor, avito, telegram, openai = build_processor(settings)
+    repo = Repository(db_session)
+
+    ad = repo.upsert_ad(
+        external_ad_id="ad-budget",
+        title="Койко-место 15 м2",
+        category="REAL_ESTATE",
+        raw_category="Недвижимость",
+        url=None,
+    )
+    chat = repo.upsert_chat(external_chat_id="chat-budget", ad_id=ad.id, customer_name="Антон")
+    repo.save_message(
+        chat_id=chat.id,
+        direction=MessageDirection.OUTBOUND,
+        text="Подскажите, пожалуйста, какой у вас бюджет в месяц?",
+        external_message_id=None,
+        payload_json=None,
+    )
+    db_session.commit()
+
+    event = IncomingEvent(
+        event_id="evt-budget-1",
+        chat_id="chat-budget",
+        message_id="msg-budget-1",
+        sender_type="user",
+        text="8-12",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-budget", title="Койко-место 15 м2", category="Недвижимость"),
+        customer_name="Антон",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert telegram.leads_sent == 0
+    assert openai.reply_calls == 0
+    assert avito.sent_messages[-1][1] == "Простите, вы имеете в виду 8–12 тысяч рублей за проживание в месяц?"
+
+
+def test_processor_handles_call_me_request_without_direct_number(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    processor, avito, telegram, openai = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-call-1",
+        chat_id="chat-call",
+        message_id="msg-call-1",
+        sender_type="user",
+        text="Говорите, куда вам набрать",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-call", title="Койко-место в центре", category="Недвижимость"),
+        customer_name="Антон",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert telegram.leads_sent == 0
+    assert openai.reply_calls == 0
+    reply = avito.sent_messages[-1][1].lower()
+    assert "многоканаль" in reply
+    assert "оставьте" in reply
+    assert "+7 922 128-56-86" not in reply
+
+
+def test_processor_first_reply_is_soft_and_contextual(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    processor, avito, telegram, openai = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-soft-1",
+        chat_id="chat-soft",
+        message_id="msg-soft-1",
+        sender_type="user",
+        text="Есть свободные места?",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-soft", title="Койко-место 20 м2", category="Недвижимость"),
+        customer_name="Александр",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert telegram.leads_sent == 0
+    assert openai.reply_calls == 0
+
+    reply = avito.sent_messages[-1][1].lower()
+    assert "заселения сейчас актуален" in reply
+    assert "койко-мест" in reply

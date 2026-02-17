@@ -16,10 +16,14 @@ DEFAULT_REAL_ESTATE_PROMPT = """# 🧠 ЕДИНЫЙ ПРОМПТ ДЛЯ CHATGPT 
 
 Ключевые правила:
 - Всегда различай хостел и квартиру-койко-место
+- Сначала отвечай в контексте текущего объявления, не уходи в другие форматы
 - Не обещай бронь
 - Не давай адрес/контакты без условия
 - Не запрашивай контакт повторно, если уже есть
 - Если сомневаешься: "Уточню у менеджера"
+- Не задавай больше одного вопроса в одном сообщении
+- Первый ответ в новом чате: приветствие + вопрос, актуален ли вопрос заселения
+- Если клиент пишет короткий бюджет (например 8-12, 8р-12р, 812), уточни, что это тысячи в месяц
 
 Стиль:
 - Вежливо, спокойно, коротко
@@ -57,6 +61,13 @@ class Settings(BaseSettings):
     self_learning_canary_percent: int = 20
     self_learning_rollback_wrong_domain_threshold: int = 1
     self_learning_promote_min_leads: int = 3
+    stats_reporting_enabled: bool = False
+    stats_report_interval_hours: int = 24
+    stats_report_lookback_days: int = 14
+    stats_report_limit: int = 60
+    stats_report_item_detail_limit: int = 20
+    stats_report_min_views_for_conversion: int = 30
+    stats_report_low_conversion_threshold: float = 3.5
 
     avito_client_id: str | None = None
     avito_client_secret: str | None = None
@@ -74,9 +85,10 @@ class Settings(BaseSettings):
     telegram_api_base: str = "https://api.telegram.org"
     telegram_leads_chat_id: str | None = None
     telegram_qa_chat_id: str | None = None
+    telegram_stats_chat_id: str | None = None
     telegram_webhook_secret: str | None = None
 
-    real_estate_prompt_version: str = "REAL_ESTATE_PROMPT_V1"
+    real_estate_prompt_version: str = "REAL_ESTATE_PROMPT_V1_2"
     real_estate_prompt_default: str = DEFAULT_REAL_ESTATE_PROMPT
 
 

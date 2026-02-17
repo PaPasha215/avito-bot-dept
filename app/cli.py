@@ -241,6 +241,36 @@ def cmd_learning_status() -> int:
         container.shutdown()
 
 
+def cmd_stats_report_once() -> int:
+    base_settings = get_settings()
+    settings = base_settings.model_copy(update={"polling_enabled": False})
+    configure_logging(settings.log_level)
+
+    container = AppContainer(settings=settings)
+    try:
+        container.startup()
+        with SessionLocal() as db:
+            result = container.stats_reporting_service.report_once(db)
+            db.commit()
+        print(
+            json.dumps(
+                {
+                    "report_date": result.report_date,
+                    "sent": result.sent,
+                    "target_chat_id": result.target_chat_id,
+                    "items_total": result.items_total,
+                    "top_reach_count": result.top_reach_count,
+                    "top_conversion_count": result.top_conversion_count,
+                    "low_conversion_count": result.low_conversion_count,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    finally:
+        container.shutdown()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Avito AI Assistant CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -249,6 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("poll-once", help="Run one Avito polling cycle")
     sub.add_parser("learn-once", help="Run one self-learning cycle")
     sub.add_parser("learning-status", help="Print self-learning status")
+    sub.add_parser("stats-report-once", help="Send one analytics report to Telegram")
     chat_diag = sub.add_parser("chat-diagnostics", help="Print full diagnostics for one chat")
     chat_diag.add_argument("--external-chat-id", required=True)
     chat_diag.add_argument("--limit", type=int, default=200)
@@ -267,6 +298,8 @@ def main() -> int:
         return cmd_learn_once()
     if args.command == "learning-status":
         return cmd_learning_status()
+    if args.command == "stats-report-once":
+        return cmd_stats_report_once()
     if args.command == "chat-diagnostics":
         return cmd_chat_diagnostics(external_chat_id=args.external_chat_id, limit=args.limit)
 

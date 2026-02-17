@@ -15,6 +15,7 @@ from app.services.processor import MessageProcessor
 from app.services.prompt_service import PromptService
 from app.services.router import RouterService
 from app.services.self_learning import SelfLearningService
+from app.services.stats_reporting import StatsReportingService
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,11 @@ class AppContainer:
 
         self.prompt_service = PromptService(settings=settings)
         self.self_learning_service = SelfLearningService(settings=settings)
+        self.stats_reporting_service = StatsReportingService(
+            settings=settings,
+            avito_client=self.avito_client,
+            telegram_client=self.telegram_client,
+        )
         classifier = DomainClassifier(openai_client=self.openai_client)
         router = RouterService(classifier=classifier, confidence_threshold=settings.classifier_confidence_threshold)
 
@@ -60,6 +66,7 @@ class AppContainer:
             router_service=router,
             prompt_service=self.prompt_service,
             self_learning_service=self.self_learning_service,
+            stats_reporting_service=self.stats_reporting_service,
             lead_detector=LeadDetector(),
             retention_service=RetentionService(),
         )

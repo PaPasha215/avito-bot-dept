@@ -14,6 +14,8 @@
   - `make learn-once`
 - Для просмотра статуса самообучения:
   - `make learning-status`
+- Для одноразового отчета по статистике объявлений:
+  - `make stats-report-once`
 - Автозапуск:
   - self-learning также запускается автоматически из poller раз в `SELF_LEARNING_INTERVAL_HOURS`.
 - Для переноса данных SQLite -> PostgreSQL:
@@ -80,6 +82,29 @@
 - `WRONG_FACT`
 - `WRONG_TONE`
 - `MISSED_LEAD`
+
+## Точечные поведенческие правки (обновлено 2026-02-17)
+Сервис применяет часть правил до LLM:
+1. Короткий бюджет (`8-12`, `8р-12р`, `812`) -> бот уточняет, что это тысячи рублей в месяц.
+2. Сообщения вида "куда вам набрать" -> бот просит контакт для обратного звонка и не выдает прямой номер менеджера.
+3. Первый ответ в новом чате -> мягкое приветствие + вопрос об актуальности заселения.
+
+Если нужно поменять эти правила, правка вносится в код:
+- `/Users/home/Documents/Bot/app/services/processor.py`
+и затем деплой обычным способом.
+
+## Ежедневный отчет по статистике объявлений
+1. Включить в `.env`:
+   - `STATS_REPORTING_ENABLED=true`
+   - `TELEGRAM_STATS_CHAT_ID=<id целевого чата>` (или fallback на `TELEGRAM_QA_CHAT_ID` / `TELEGRAM_LEADS_CHAT_ID`)
+2. Базовые параметры:
+   - `STATS_REPORT_INTERVAL_HOURS=24`
+   - `STATS_REPORT_LOOKBACK_DAYS=14`
+   - `STATS_REPORT_MIN_VIEWS_FOR_CONVERSION=30`
+   - `STATS_REPORT_LOW_CONVERSION_THRESHOLD=3.5`
+3. Проверка вручную:
+   - `make stats-report-once`
+4. В автомате отчет запускается в процессе poller раз в заданный интервал.
 
 ## Перенос на VPS (Beget)
 1. Создать сервер и установить Docker/Compose.

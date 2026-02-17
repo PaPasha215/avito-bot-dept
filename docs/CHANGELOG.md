@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-02-17 - v0.1.1
+
+### Added
+- Детерминированные guardrails в `MessageProcessor`:
+  - уточнение короткого бюджета (`8-12`, `8р-12р`, `812`) как "тысяч рублей в месяц";
+  - отдельный ответ на "куда вам набрать" без выдачи прямого номера менеджера;
+  - мягкий первый ответ в новом чате (приветствие + вопрос об актуальности заселения).
+- Runtime-контекст объявления в промпте генерации:
+  - явные `ad_title/ad_category` и фокус по типу объявления (в т.ч. "койко-место").
+- Тесты для новых сценариев в `app/tests/test_processor.py`.
+- Daily stats reporting:
+  - новый `StatsReportingService` с автоциклом через poller;
+  - ручной запуск `stats-report-once` (CLI + `make stats-report-once`);
+  - новый тест `app/tests/test_stats_reporting.py`.
+- AvitoClient methods for analytics:
+  - `get_item_analytics` (`/stats/v2/accounts/{user_id}/items`);
+  - `get_account_item` (`/core/v1/accounts/{user_id}/items/{item_id}/`).
+- Новые env-настройки `STATS_REPORT_*` и `TELEGRAM_STATS_CHAT_ID`.
+
+### Changed
+- Обновлен default `REAL_ESTATE` prompt до версии `REAL_ESTATE_PROMPT_V1_2`.
+- Telegram lead-card сделана компактнее:
+  - summary сокращается;
+  - в карточке только последние 3 реплики контекста.
+
 ## 2026-02-16 - v0.1.0
 
 ### Added

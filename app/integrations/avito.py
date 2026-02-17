@@ -367,6 +367,51 @@ class AvitoClient:
             resp = self._client.post(url, headers=self._headers(), json=payload)
         resp.raise_for_status()
 
+    def get_item_analytics(
+        self,
+        date_from: str,
+        date_to: str,
+        metrics: list[str],
+        grouping: str = "item",
+        limit: int = 50,
+        offset: int = 0,
+        sort: dict[str, str] | None = None,
+        category_ids: list[int] | None = None,
+    ) -> dict:
+        if not self.user_id:
+            raise RuntimeError("AVITO_USER_ID is not configured")
+        payload: dict[str, Any] = {
+            "dateFrom": date_from,
+            "dateTo": date_to,
+            "metrics": metrics,
+            "grouping": grouping,
+            "limit": max(1, min(limit, 1000)),
+            "offset": max(0, offset),
+        }
+        if sort:
+            payload["sort"] = sort
+        if category_ids:
+            payload["filter"] = {"categoryIDs": category_ids}
+
+        url = f"https://api.avito.ru/stats/v2/accounts/{self.user_id}/items"
+        resp = self._client.post(url, headers=self._headers(), json=payload)
+        if resp.status_code == 401:
+            self._token = None
+            resp = self._client.post(url, headers=self._headers(), json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_account_item(self, item_id: int | str) -> dict:
+        if not self.user_id:
+            raise RuntimeError("AVITO_USER_ID is not configured")
+        url = f"https://api.avito.ru/core/v1/accounts/{self.user_id}/items/{item_id}/"
+        resp = self._client.get(url, headers=self._headers())
+        if resp.status_code == 401:
+            self._token = None
+            resp = self._client.get(url, headers=self._headers())
+        resp.raise_for_status()
+        return resp.json()
+
     def _resolve_url_template(self, template: str, chat_id: str | None = None) -> str:
         user_id = self.user_id or ""
         resolved = template.replace("USER_ID", user_id)

@@ -19,6 +19,7 @@ from app.services.prompt_service import PromptService
 from app.services.retry import with_retry
 from app.services.router import RouterService
 from app.services.self_learning import SelfLearningService
+from app.services.stats_reporting import StatsReportingService
 from app.types import ChatDecision, ChatState, IncomingEvent, LeadStatus, MessageDirection
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,16 @@ class ProcessingStats:
 
 class MessageProcessor:
     CURSOR_KEY = "avito_cursor"
+    CURRENCY_RE = re.compile(r"(?:₽|руб(?:\.|ля|лей)?|(?:^|[\s.,;:()\-])р(?:$|[\s.,;:()\-]))", re.IGNORECASE)
+    BUDGET_WORD_RE = re.compile(
+        r"(бюджет|стоим|цена|платить|сколько\s+планируете|в\s*месяц|за\s*месяц|мес\.?)",
+        re.IGNORECASE,
+    )
+    SHORT_RANGE_RE = re.compile(
+        r"(?:от\s*)?(\d{1,2})\s*(?:₽|руб(?:\.|ля|лей)?|р|к|тыс(?:яч)?)?\s*(?:-|–|—|до)\s*(\d{1,2})\s*(?:₽|руб(?:\.|ля|лей)?|р|к|тыс(?:яч)?)?\b",
+        re.IGNORECASE,
+    )
+    COMPACT_NUMBER_RE = re.compile(r"(?<!\d)(\d{3,4})(?!\d)")
 
     def __init__(
         self,
@@ -45,6 +56,7 @@ class MessageProcessor:
         router_service: RouterService,
         prompt_service: PromptService,
         self_learning_service: SelfLearningService | None,
+        stats_reporting_service: StatsReportingService | None,
         lead_detector: LeadDetector,
         retention_service: RetentionService,
     ):
@@ -55,6 +67,7 @@ class MessageProcessor:
         self.router_service = router_service
         self.prompt_service = prompt_service
         self.self_learning_service = self_learning_service
+        self.stats_reporting_service = stats_reporting_service
         self.lead_detector = lead_detector
         self.retention_service = retention_service
 
@@ -115,6 +128,22 @@ class MessageProcessor:
                             learn_result.stable_version,
                             learn_result.examples_created,
                             learn_result.source_chats,
+                        )
+            if self.stats_reporting_service is not None:
+                try:
+                    report_result = self.stats_reporting_service.run_if_due(cleanup_db)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Stats reporting cycle failed: %s", exc)
+                else:
+                    if report_result is not None:
+                        logger.info(
+                            "Stats report cycle done: sent=%s target=%s items=%s reach=%s conversion=%s low_conversion=%s",
+                            report_result.sent,
+                            report_result.target_chat_id,
+                            report_result.items_total,
+                            report_result.top_reach_count,
+                            report_result.top_conversion_count,
+                            report_result.low_conversion_count,
                         )
 
         return stats
@@ -200,36 +229,49 @@ class MessageProcessor:
                 db.commit()
                 return "processed"
 
-            prompt = self.prompt_service.get_real_estate_prompt(db)
             history_messages = repo.get_recent_messages(chat.id, limit=self.settings.max_recent_messages_for_reply)
-            chat_history = [
-                {
-                    "role": "user" if m.direction == MessageDirection.INBOUND.value else "assistant",
-                    "content": m.text,
-                }
-                for m in history_messages
-            ]
-            effective_prompt_text = prompt.text
+            rule_based_reply = self._build_rule_based_reply(
+                ad_title=ad.title,
+                ad_category=ad.raw_category or ad.category,
+                history_messages=history_messages,
+            )
+            prompt = self.prompt_service.get_real_estate_prompt(db)
             learning_version: str | None = None
             learning_examples_count = 0
-            if self.self_learning_service is not None:
-                try:
-                    effective_prompt_text, learning_version, learning_examples_count = self.self_learning_service.build_augmented_prompt(
-                        db=db,
-                        base_prompt=prompt.text,
-                        chat_external_id=chat.external_chat_id,
-                        ad_title=ad.title,
-                        recent_messages=recent_texts,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("Self-learning prompt augmentation failed for chat %s: %s", event.chat_id, exc)
+            if rule_based_reply is not None:
+                response_text = self._trim_sentences(rule_based_reply, max_sentences=4)
+            else:
+                chat_history = [
+                    {
+                        "role": "user" if m.direction == MessageDirection.INBOUND.value else "assistant",
+                        "content": m.text,
+                    }
+                    for m in history_messages
+                ]
+                effective_prompt_text = self._build_runtime_prompt(
+                    base_prompt=prompt.text,
+                    ad_title=ad.title,
+                    ad_category=ad.raw_category or ad.category,
+                    history_messages=history_messages,
+                )
+                if self.self_learning_service is not None:
+                    try:
+                        effective_prompt_text, learning_version, learning_examples_count = self.self_learning_service.build_augmented_prompt(
+                            db=db,
+                            base_prompt=effective_prompt_text,
+                            chat_external_id=chat.external_chat_id,
+                            ad_title=ad.title,
+                            recent_messages=recent_texts,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("Self-learning prompt augmentation failed for chat %s: %s", event.chat_id, exc)
 
-            response_text = with_retry(
-                lambda: self.openai_client.generate_reply(effective_prompt_text, chat_history),
-                name="openai_generate_reply",
-                attempts=3,
-            )
-            response_text = self._trim_sentences(response_text, max_sentences=4)
+                response_text = with_retry(
+                    lambda: self.openai_client.generate_reply(effective_prompt_text, chat_history),
+                    name="openai_generate_reply",
+                    attempts=3,
+                )
+                response_text = self._trim_sentences(response_text, max_sentences=4)
 
             with_retry(
                 lambda: self.avito_client.send_message(chat_id=event.chat_id, text=response_text),
@@ -387,3 +429,201 @@ class MessageProcessor:
         if any(token in value for token in ["авто", "машин", "транспорт", "автомоб"]):
             return "AUTO"
         return "OTHER"
+
+    def _build_rule_based_reply(
+        self,
+        ad_title: str,
+        ad_category: str | None,
+        history_messages: list,
+    ) -> str | None:
+        latest_inbound = self._latest_inbound_text(history_messages)
+        if not latest_inbound:
+            return None
+
+        has_contact = self._extract_contact(history_messages) is not None
+        if self._is_call_back_request(latest_inbound):
+            if has_contact:
+                return (
+                    "Контакт вижу, спасибо. У нас многоканальная линия, поэтому напрямую до менеджера дозвониться нельзя. "
+                    "Менеджер Сергей сам позвонит вам в ближайшее время."
+                )
+            return (
+                "У нас многоканальная линия, поэтому напрямую до менеджера дозвониться нельзя. "
+                "Оставьте, пожалуйста, номер телефона или мессенджер, и менеджер Сергей сам свяжется с вами."
+            )
+
+        budget_range = self._detect_short_budget_range_thousands(latest_inbound, history_messages)
+        if budget_range is not None and not has_contact:
+            left, right = budget_range
+            if left == right:
+                return f"Простите, вы имеете в виду {left} тысяч рублей за проживание в месяц?"
+            return f"Простите, вы имеете в виду {left}–{right} тысяч рублей за проживание в месяц?"
+
+        if self._is_first_bot_reply(history_messages) and not has_contact:
+            focus = self._detect_ad_focus(ad_title=ad_title, ad_category=ad_category)
+            if focus:
+                return f"Здравствуйте! Помогу по объявлению о {focus}. Подскажите, пожалуйста, вопрос заселения сейчас актуален?"
+            return "Здравствуйте! Подскажите, пожалуйста, вопрос заселения сейчас актуален?"
+
+        return None
+
+    def _build_runtime_prompt(
+        self,
+        base_prompt: str,
+        ad_title: str,
+        ad_category: str | None,
+        history_messages: list,
+    ) -> str:
+        focus = self._detect_ad_focus(ad_title=ad_title, ad_category=ad_category) or "проживании"
+        is_first_reply = self._is_first_bot_reply(history_messages)
+
+        stage_rule = (
+            "Это первый ответ в чате: сначала поприветствуй и задай только один вопрос про актуальность заселения."
+            if is_first_reply
+            else "Это продолжение диалога: задавай только один следующий уточняющий вопрос и не делай длинных сообщений."
+        )
+
+        runtime_rules = (
+            "\n\n# Runtime Rules (обязательно)\n"
+            f"- Заголовок объявления: {ad_title}\n"
+            f"- Категория объявления: {ad_category or 'UNKNOWN'}\n"
+            f"- Основной фокус текущего чата: {focus}\n"
+            "- Отвечай только в контексте этого объявления.\n"
+            "- Если объявление про койко-место, не переключайся на другие форматы без прямого запроса клиента.\n"
+            "- Если тип размещения неочевиден, задай один короткий уточняющий вопрос.\n"
+            "- Не задавай более одного вопроса в одном сообщении.\n"
+            f"- {stage_rule}\n"
+        )
+        return f"{base_prompt}{runtime_rules}"
+
+    def _latest_inbound_text(self, history_messages: list) -> str:
+        for message in reversed(history_messages):
+            if message.direction == MessageDirection.INBOUND.value:
+                return message.text.strip()
+        return ""
+
+    def _last_outbound_text(self, history_messages: list) -> str:
+        for message in reversed(history_messages):
+            if message.direction == MessageDirection.OUTBOUND.value:
+                return message.text.strip()
+        return ""
+
+    def _is_first_bot_reply(self, history_messages: list) -> bool:
+        outbound_count = sum(1 for message in history_messages if message.direction == MessageDirection.OUTBOUND.value)
+        inbound_count = sum(1 for message in history_messages if message.direction == MessageDirection.INBOUND.value)
+        return inbound_count >= 1 and outbound_count == 0
+
+    @staticmethod
+    def _is_call_back_request(text: str) -> bool:
+        normalized = " ".join(text.lower().split())
+        return bool(
+            "куда вам набрать" in normalized
+            or "куда набрать" in normalized
+            or "куда вам позвонить" in normalized
+            or "куда позвонить" in normalized
+            or "вам набрать" in normalized
+            or "вам позвонить" in normalized
+        )
+
+    def _detect_short_budget_range_thousands(
+        self,
+        latest_inbound_text: str,
+        history_messages: list,
+    ) -> tuple[int, int] | None:
+        text = " ".join(latest_inbound_text.lower().split())
+        if not text:
+            return None
+
+        has_currency = bool(self.CURRENCY_RE.search(text))
+        has_budget_words = bool(self.BUDGET_WORD_RE.search(text))
+        asked_budget_recently = self._asked_budget_recently(history_messages)
+
+        budget_context = has_currency or has_budget_words or asked_budget_recently
+        if not budget_context:
+            return None
+
+        range_match = self.SHORT_RANGE_RE.search(text)
+        if range_match:
+            left = int(range_match.group(1))
+            right = int(range_match.group(2))
+            if 1 <= left <= 24 and 1 <= right <= 24:
+                return tuple(sorted((left, right)))
+
+        if asked_budget_recently and self._is_numeric_budget_reply(text):
+            compact_match = self.COMPACT_NUMBER_RE.search(text)
+            if compact_match:
+                compact = self._split_compact_short_budget(compact_match.group(1))
+                if compact:
+                    return tuple(sorted(compact))
+
+            single_match = re.fullmatch(r"\d{1,2}", text)
+            if single_match:
+                value = int(single_match.group(0))
+                if 1 <= value <= 24:
+                    return value, value
+
+        if has_currency or has_budget_words:
+            compact_match = self.COMPACT_NUMBER_RE.search(text)
+            if compact_match:
+                compact = self._split_compact_short_budget(compact_match.group(1))
+                if compact:
+                    return tuple(sorted(compact))
+
+        return None
+
+    def _asked_budget_recently(self, history_messages: list) -> bool:
+        last_outbound = self._last_outbound_text(history_messages).lower()
+        if not last_outbound:
+            return False
+        return bool(
+            "бюджет" in last_outbound
+            or "сколько планируете платить" in last_outbound
+            or "какой у вас бюджет" in last_outbound
+            or "стоимость" in last_outbound
+            or "цена" in last_outbound
+        )
+
+    @staticmethod
+    def _is_numeric_budget_reply(text: str) -> bool:
+        compact = text.replace(" ", "")
+        if re.fullmatch(r"\d{1,4}", compact):
+            return True
+        if re.fullmatch(r"(?:от)?\d{1,2}(?:-|–|—|до)\d{1,2}", compact):
+            return True
+        if re.fullmatch(r"(?:от)?\d{1,2}(?:р|руб|₽)?(?:-|–|—|до)\d{1,2}(?:р|руб|₽)?", compact):
+            return True
+        return False
+
+    @staticmethod
+    def _split_compact_short_budget(token: str) -> tuple[int, int] | None:
+        if not token.isdigit() or len(token) not in {3, 4}:
+            return None
+        candidates: list[tuple[int, int]] = []
+        for split_index in range(1, len(token)):
+            left_chunk = token[:split_index]
+            right_chunk = token[split_index:]
+            if len(left_chunk) > 2 or len(right_chunk) > 2:
+                continue
+            left = int(left_chunk)
+            right = int(right_chunk)
+            if 1 <= left <= 24 and 1 <= right <= 24:
+                candidates.append((left, right))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda pair: (abs(pair[0] - pair[1]), max(pair[0], pair[1])))
+        return candidates[0]
+
+    @staticmethod
+    def _detect_ad_focus(ad_title: str, ad_category: str | None) -> str | None:
+        combined = f"{ad_title} {ad_category or ''}".lower()
+        if "койко" in combined:
+            return "койко-месте"
+        if "комнат" in combined:
+            return "комнате"
+        if "квартир" in combined:
+            return "квартире"
+        if "хостел" in combined or "гостиниц" in combined or "гостиница" in combined:
+            return "проживании в хостеле"
+        if "семейн" in combined:
+            return "семейном номере"
+        return None
