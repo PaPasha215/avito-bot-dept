@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-02-17 - MVP v1.0 checkpoint
+
+### Stable state
+- Прод-контур на VPS работает (`healthz=ok`, polling активен).
+- Автоответы по недвижимости включены, non-target категории в `IGNORE_SILENT`.
+- Задержка ответа включена: `REPLY_DELAY_SECONDS=6`.
+- Лиды в Telegram и ежедневный stats-отчет в Telegram работают.
+- Точка зафиксирована для быстрого rollback.
+
 ## 2026-02-17 - v0.1.1
 
 ### Added
