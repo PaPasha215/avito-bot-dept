@@ -75,6 +75,7 @@ docker compose up --build
 
 ```bash
 make validate-env
+make validate-youla-readiness
 make poll-once
 make learn-once
 make learning-status
@@ -85,6 +86,8 @@ make run
 
 Подробный формат через CLI:
 `python3 -m app.cli chat-diagnostics --external-chat-id <external_chat_id> --limit 200`
+Для Youla readiness:
+`python3 -m app.cli validate-youla-readiness`
 
 ## Основные endpoints
 

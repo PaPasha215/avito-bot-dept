@@ -95,6 +95,15 @@ class Settings(BaseSettings):
     avito_poll_limit: int = 50
     avito_request_timeout_seconds: int = 20
 
+    youla_enabled: bool = False
+    youla_mode: str = "feed_only"  # feed_only | chat_api
+    youla_api_base: str | None = None
+    youla_account_id: str | None = None
+    youla_api_token: str | None = None
+    youla_updates_url: str | None = None
+    youla_send_message_url_template: str | None = None
+    youla_request_timeout_seconds: int = 20
+
     telegram_bot_token: str | None = None
     telegram_api_base: str = "https://api.telegram.org"
     telegram_leads_chat_id: str | None = None

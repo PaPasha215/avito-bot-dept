@@ -21,6 +21,13 @@
   - добавлен анти-абьюз фильтр: оскорбления/угрозы/обвинения -> `IGNORE_SILENT`.
 - Документация:
   - добавлено отдельное ТЗ по двухуровневому Telegram-меню: `docs/TELEGRAM_MENU_2LEVEL_TZ.md`.
+  - добавлен `docs/CONNECTOR_READINESS_CHECKLIST.md` с чеклистом и приоритизацией новых площадок.
+  - добавлены документы старта Youla:
+    - `docs/YOULA_ONBOARDING.md`
+    - `docs/YOULA_SUPPORT_REQUEST_TEMPLATE.md`
+- Конфиг/CLI:
+  - добавлены env-параметры `YOULA_*` в `.env.example`;
+  - добавлена команда `make validate-youla-readiness` (`python3 -m app.cli validate-youla-readiness`).
 
 ## 2026-02-17 - v1.0.1
 
