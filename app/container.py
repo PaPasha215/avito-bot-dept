@@ -7,6 +7,7 @@ from app.db import SessionLocal, init_db
 from app.integrations.avito import AvitoClient
 from app.integrations.openai_client import OpenAIClient
 from app.integrations.telegram import TelegramClient
+from app.integrations.youla import YoulaClient
 from app.services.classifier import DomainClassifier
 from app.services.cleanup import RetentionService
 from app.services.lead_detector import LeadDetector
@@ -43,6 +44,12 @@ class AppContainer:
             model=settings.openai_model,
             timeout_seconds=settings.openai_timeout_seconds,
         )
+        self.youla_client = YoulaClient(
+            enabled=settings.youla_enabled and settings.youla_mode.lower() == "chat_api",
+            api_base=settings.youla_api_base,
+            api_token=settings.youla_api_token,
+            timeout_seconds=settings.youla_request_timeout_seconds,
+        )
         self.telegram_client = TelegramClient(
             bot_token=settings.telegram_bot_token,
             api_base=settings.telegram_api_base,
@@ -62,6 +69,7 @@ class AppContainer:
             settings=settings,
             avito_client=self.avito_client,
             openai_client=self.openai_client,
+            youla_client=self.youla_client,
             telegram_client=self.telegram_client,
             router_service=router,
             prompt_service=self.prompt_service,
@@ -89,5 +97,6 @@ class AppContainer:
     def shutdown(self) -> None:
         self.poller.stop()
         self.avito_client.close()
+        self.youla_client.close()
         self.openai_client.close()
         self.telegram_client.close()

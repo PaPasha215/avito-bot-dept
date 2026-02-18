@@ -94,6 +94,7 @@ make run
 - `GET /healthz`
 - `GET /api/learning/status`
 - `POST /webhooks/telegram`
+- `POST /webhooks/youla`
 - `GET /api/chats`
 - `GET /api/chats/{id}`
 - `GET /api/chats/external/{external_chat_id}/diagnostics`
@@ -114,6 +115,10 @@ make run
 
 Официальный источник схемы messenger:
 - `https://developers.avito.ru/web/1/openapi/info/messenger`
+
+Для Youla (chat_api):
+- входящие сообщения: webhook `POST /webhooks/youla` с `Ce-Type: message.incom`;
+- исходящие сообщения: `POST /messages` на `YOULA_API_BASE` с `Authorization: Bearer <token>`.
 
 Если Telegram возвращает `Bad Request: chat not found`, нужно:
 1. Добавить бота в целевой чат.

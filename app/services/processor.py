@@ -13,6 +13,7 @@ from app.db import SessionLocal
 from app.integrations.avito import AvitoClient
 from app.integrations.openai_client import OpenAIClient
 from app.integrations.telegram import TelegramClient
+from app.integrations.youla import YoulaClient
 from app.repositories import Repository
 from app.services.cleanup import RetentionService
 from app.services.lead_detector import LeadDetector
@@ -97,6 +98,7 @@ class MessageProcessor:
         settings: Settings,
         avito_client: AvitoClient,
         openai_client: OpenAIClient,
+        youla_client: YoulaClient | None,
         telegram_client: TelegramClient,
         router_service: RouterService,
         prompt_service: PromptService,
@@ -108,6 +110,7 @@ class MessageProcessor:
         self.settings = settings
         self.avito_client = avito_client
         self.openai_client = openai_client
+        self.youla_client = youla_client
         self.telegram_client = telegram_client
         self.router_service = router_service
         self.prompt_service = prompt_service
@@ -197,6 +200,7 @@ class MessageProcessor:
         repo = Repository(db)
         payload = json.dumps(
             {
+                "marketplace": event.marketplace,
                 "event_id": event.event_id,
                 "chat_id": event.chat_id,
                 "message_id": event.message_id,
@@ -204,13 +208,17 @@ class MessageProcessor:
                 "ad_id": event.ad_context.ad_id,
                 "ad_title": event.ad_context.title,
                 "ad_category": event.ad_context.category,
+                "sender_id": event.sender_id,
+                "recipient_id": event.recipient_id,
+                "product_id": event.product_id,
             },
             ensure_ascii=False,
         )
 
-        idempotency_key = f"avito:{event.event_id}"
+        source = (event.marketplace or "avito").strip().lower()
+        idempotency_key = f"{source}:{event.event_id}"
         event_log = repo.start_event(
-            source="avito",
+            source=source,
             event_type="incoming_message",
             idempotency_key=idempotency_key,
             payload=payload,
@@ -332,8 +340,8 @@ class MessageProcessor:
                 response_text = self._trim_sentences(response_text, max_sentences=4)
 
             with_retry(
-                lambda: self._send_with_delay(chat_id=event.chat_id, text=response_text),
-                name="avito_send_message",
+                lambda: self._send_with_delay(event=event, text=response_text),
+                name=f"{source}_send_message",
                 attempts=3,
             )
 
@@ -488,11 +496,30 @@ class MessageProcessor:
             return "AUTO"
         return "OTHER"
 
-    def _send_with_delay(self, chat_id: str, text: str) -> None:
+    def process_incoming_event(self, db: Session, event: IncomingEvent, allow_reply: bool = True) -> str:
+        return self._process_event(db=db, event=event, allow_reply=allow_reply)
+
+    def _send_with_delay(self, event: IncomingEvent, text: str) -> None:
         delay = max(0, int(self.settings.reply_delay_seconds))
         if delay > 0:
             time.sleep(delay)
-        self.avito_client.send_message(chat_id=chat_id, text=text)
+        marketplace = (event.marketplace or "avito").strip().lower()
+        if marketplace == "youla":
+            if self.youla_client is None or not self.youla_client.enabled:
+                raise RuntimeError("Youla client is not configured")
+            sender_id = event.recipient_id
+            recipient_id = event.sender_id
+            product_id = event.product_id or event.ad_context.ad_id
+            if not sender_id or not recipient_id or not product_id:
+                raise RuntimeError("Youla send requires sender_id, recipient_id and product_id")
+            self.youla_client.send_message(
+                sender_id=sender_id,
+                recipient_id=recipient_id,
+                product_id=product_id,
+                text=text,
+            )
+            return
+        self.avito_client.send_message(chat_id=event.chat_id, text=text)
 
     def _build_rule_based_reply(
         self,

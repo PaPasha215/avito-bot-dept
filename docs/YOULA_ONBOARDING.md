@@ -10,16 +10,22 @@
 - Получены ссылки на Swagger:
   - https://partner-api.youla.ru/swagger/rapi
   - https://partner-api.youla.ru/swagger/ui
+- Подтверждено по Swagger:
+  - авторизация: `Authorization: Bearer <token>`;
+  - исходящие сообщения: `POST /messages`;
+  - входящие сообщения: webhook-событие `Ce-Type: message.incom` (модель `IncomeMessage`);
+  - в swagger нет отдельного polling-метода `GET /messages`.
 - Добавлен config-ready слой:
   - `YOULA_ENABLED`
   - `YOULA_MODE` (`feed_only` / `chat_api`)
   - `YOULA_API_BASE`
-  - `YOULA_ACCOUNT_ID`
   - `YOULA_API_TOKEN`
-  - `YOULA_UPDATES_URL`
-  - `YOULA_SEND_MESSAGE_URL_TEMPLATE`
+  - `YOULA_WEBHOOK_SECRET` (опционально)
+  - `YOULA_FORCE_REAL_ESTATE`
 - Добавлена команда readiness-проверки:
   - `make validate-youla-readiness`
+- Добавлен webhook endpoint в сервисе:
+  - `POST /webhooks/youla` (принимает `message.incom` и передает событие в Processor).
 
 ## Этапы запуска
 
@@ -43,9 +49,8 @@
 2. Заполнить Youla env-переменные.
 3. Прогнать `make validate-youla-readiness`.
 4. Реализовать `YoulaAdapter` по контракту событий:
-   - fetch updates;
-   - get chat context;
-   - send message.
+   - webhook ingestion `message.incom`;
+   - send message (`POST /messages`).
 5. Подключить canary (10-20% диалогов) и наблюдение.
 
 ## Правила качества (те же, что в Avito)

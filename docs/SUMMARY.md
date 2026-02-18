@@ -143,3 +143,10 @@
 4. Получены рабочие ссылки Youla Swagger для валидации:
    - `https://partner-api.youla.ru/swagger/rapi`
    - `https://partner-api.youla.ru/swagger/ui`
+5. Подтверждено по Swagger:
+   - auth: `Authorization: Bearer <token>`;
+   - входящие: webhook `message.incom`;
+   - исходящие: `POST /messages`.
+6. Реализован backend v0.1:
+   - endpoint `POST /webhooks/youla`;
+   - source-aware отправка ответа в `YoulaClient`.

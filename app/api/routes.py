@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
@@ -25,6 +27,7 @@ from app.schemas import (
     RoutingDecisionItem,
     TelegramWebhookResponse,
 )
+from app.types import AdContext, IncomingEvent
 
 router = APIRouter()
 
@@ -39,6 +42,19 @@ def get_db():
 
 def _settings_from_app(app: FastAPI) -> Settings:
     return app.state.container.settings
+
+
+def _parse_ce_time(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    normalized = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 @router.get("/healthz", response_model=HealthResponse)
@@ -289,6 +305,62 @@ def telegram_webhook(
                 repo.create_feedback_event(chat_id=chat.id if chat else None, tag=tag, comment=comment)
                 db.commit()
 
+    return TelegramWebhookResponse(ok=True)
+
+
+@router.post("/webhooks/youla", response_model=TelegramWebhookResponse)
+def youla_webhook(
+    request: Request,
+    payload: dict,
+    db: Session = Depends(get_db),
+    ce_type: str | None = Header(default=None, alias="Ce-Type"),
+    ce_id: str | None = Header(default=None, alias="Ce-Id"),
+    ce_time: str | None = Header(default=None, alias="Ce-Time"),
+    x_youla_webhook_secret: str | None = Header(default=None, alias="X-Youla-Webhook-Secret"),
+):
+    settings = _settings_from_app(request.app)
+    if not settings.youla_enabled:
+        return TelegramWebhookResponse(ok=True)
+
+    if settings.youla_webhook_secret and x_youla_webhook_secret != settings.youla_webhook_secret:
+        raise HTTPException(status_code=403, detail="invalid_youla_webhook_secret")
+
+    if (ce_type or "").strip().lower() != "message.incom":
+        return TelegramWebhookResponse(ok=True)
+
+    message_text = str(payload.get("message") or "").strip()
+    chat_id = str(payload.get("chat_id") or "").strip()
+    message_id = str(payload.get("id") or "").strip()
+    sender_id = str(payload.get("sender_id") or "").strip()
+    recipient_id = str(payload.get("recipient_id") or "").strip()
+    product_id = str(payload.get("product_id") or "").strip()
+    if not (message_text and chat_id and message_id and sender_id and recipient_id and product_id):
+        return TelegramWebhookResponse(ok=True)
+
+    external_chat_id = f"youla:{chat_id}"
+    external_message_id = f"youla:{message_id}"
+    event_id = f"youla:{ce_id}" if ce_id else f"youla:{chat_id}:{message_id}"
+    ad_category = "Недвижимость" if settings.youla_force_real_estate else None
+    incoming = IncomingEvent(
+        event_id=event_id,
+        chat_id=external_chat_id,
+        message_id=external_message_id,
+        sender_type="user",
+        text=message_text,
+        created_at=_parse_ce_time(ce_time),
+        ad_context=AdContext(
+            ad_id=f"youla:{product_id}",
+            title=f"Youla product {product_id}",
+            category=ad_category,
+            url=None,
+        ),
+        customer_name=None,
+        marketplace="youla",
+        sender_id=sender_id,
+        recipient_id=recipient_id,
+        product_id=product_id,
+    )
+    request.app.state.container.processor.process_incoming_event(db=db, event=incoming, allow_reply=True)
     return TelegramWebhookResponse(ok=True)
 
 

@@ -73,6 +73,18 @@
 - Endpoint: `POST /webhooks/telegram`
 - Рекомендуется включить `TELEGRAM_WEBHOOK_SECRET`.
 
+## Youla webhook (chat_api)
+- Endpoint: `POST /webhooks/youla`
+- Обрабатывается только событие: `Ce-Type: message.incom`
+- Авторизация исходящих в Youla:
+  - `Authorization: Bearer <YOULA_API_TOKEN>`
+- Перед включением:
+  1. `YOULA_ENABLED=true`
+  2. `YOULA_MODE=chat_api`
+  3. `YOULA_API_BASE=https://partner-api.youla.ru`
+  4. `YOULA_API_TOKEN=<token>`
+  5. (опционально) `YOULA_WEBHOOK_SECRET=<secret>`
+
 ## Команда обратной связи
 В Telegram можно отправить:
 `/feedback <external_chat_id> <TAG> <comment>`

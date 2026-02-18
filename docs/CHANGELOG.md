@@ -29,6 +29,11 @@
 - Конфиг/CLI:
   - добавлены env-параметры `YOULA_*` в `.env.example`;
   - добавлена команда `make validate-youla-readiness` (`python3 -m app.cli validate-youla-readiness`).
+- Youla integration v0.1:
+  - добавлен `app/integrations/youla.py` (`POST /messages`, Bearer auth);
+  - добавлен `POST /webhooks/youla` для событий `Ce-Type: message.incom`;
+  - `MessageProcessor` стал source-aware (отправка в Avito/Youla по `event.marketplace`);
+  - добавлен тест `app/tests/test_youla_webhook.py`.
 
 ## 2026-02-17 - v1.0.1
 

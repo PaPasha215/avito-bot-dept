@@ -47,12 +47,8 @@ def cmd_validate_youla_readiness() -> int:
     required = {
         "YOULA_MODE": settings.youla_mode,
         "YOULA_API_BASE": settings.youla_api_base,
-        "YOULA_ACCOUNT_ID": settings.youla_account_id,
         "YOULA_API_TOKEN": settings.youla_api_token,
     }
-    if (settings.youla_mode or "").strip().lower() == "chat_api":
-        required["YOULA_UPDATES_URL"] = settings.youla_updates_url
-        required["YOULA_SEND_MESSAGE_URL_TEMPLATE"] = settings.youla_send_message_url_template
 
     missing = [k for k, v in required.items() if not v]
     if missing:

@@ -58,6 +58,10 @@ class IncomingEvent:
     ad_context: AdContext
     customer_name: str | None = None
     counterparty_user_id: int | None = None
+    marketplace: str = "avito"
+    sender_id: str | None = None
+    recipient_id: str | None = None
+    product_id: str | None = None
 
 
 @dataclass(slots=True)

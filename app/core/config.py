@@ -97,12 +97,11 @@ class Settings(BaseSettings):
 
     youla_enabled: bool = False
     youla_mode: str = "feed_only"  # feed_only | chat_api
-    youla_api_base: str | None = None
-    youla_account_id: str | None = None
+    youla_api_base: str | None = "https://partner-api.youla.ru"
     youla_api_token: str | None = None
-    youla_updates_url: str | None = None
-    youla_send_message_url_template: str | None = None
     youla_request_timeout_seconds: int = 20
+    youla_webhook_secret: str | None = None
+    youla_force_real_estate: bool = True
 
     telegram_bot_token: str | None = None
     telegram_api_base: str = "https://api.telegram.org"

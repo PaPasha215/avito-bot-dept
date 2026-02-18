@@ -182,3 +182,14 @@
 - Влияние:
   - добавлены env-параметры `YOULA_*` и команда `validate-youla-readiness`;
   - добавлены документы `docs/YOULA_ONBOARDING.md` и `docs/YOULA_SUPPORT_REQUEST_TEMPLATE.md`.
+
+### D-025: Youla chat-контур через webhook + POST /messages
+- Решение:
+  1. принимать входящие Youla-сообщения через `POST /webhooks/youla` при `Ce-Type: message.incom`;
+  2. исходящие отправлять через `POST /messages` с `Authorization: Bearer <token>`;
+  3. события сохранять как отдельный marketplace (`youla`) с idempotency-ключом `youla:<event_id>`.
+- Причина: в Swagger отсутствует polling endpoint входящих сообщений, поэтому корректная модель — webhook-driven ingestion.
+- Влияние:
+  - добавлен `YoulaClient`;
+  - `MessageProcessor` поддерживает source-aware отправку (`avito`/`youla`);
+  - добавлен endpoint `POST /webhooks/youla`.

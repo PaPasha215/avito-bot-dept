@@ -11,15 +11,16 @@
 
 ## Компоненты
 1. `AvitoClient`: polling входящих сообщений + отправка ответов.
-2. `RouterService`: решение `REPLY` или `IGNORE_SILENT`.
-3. `DomainClassifier`: классификация домена (эвристики + OpenAI fallback).
-4. `OpenAIClient`: генерация ответа и summary.
-5. `LeadDetector`: извлечение контакта.
-6. `TelegramClient`: отправка карточек лидов.
-7. `MessageProcessor`: оркестрация полного цикла.
-8. `Poller`: периодический запуск цикла каждые 10 секунд.
-9. `SelfLearningService`: генерация обучающих примеров + canary/promotion/rollback.
-10. `StatsReportingService`: агрегирует статистику объявлений через Avito `stats/v2` и отправляет weekly Telegram-отчет по расписанию.
+2. `YoulaClient`: отправка ответов в Youla `POST /messages` + webhook-driven входящие.
+3. `RouterService`: решение `REPLY` или `IGNORE_SILENT`.
+4. `DomainClassifier`: классификация домена (эвристики + OpenAI fallback).
+5. `OpenAIClient`: генерация ответа и summary.
+6. `LeadDetector`: извлечение контакта.
+7. `TelegramClient`: отправка карточек лидов.
+8. `MessageProcessor`: оркестрация полного цикла.
+9. `Poller`: периодический запуск цикла каждые 10 секунд.
+10. `SelfLearningService`: генерация обучающих примеров + canary/promotion/rollback.
+11. `StatsReportingService`: агрегирует статистику объявлений через Avito `stats/v2` и отправляет weekly Telegram-отчет по расписанию.
 
 ## Avito API (актуализировано 2026-02-16)
 - Список API берется из `https://developers.avito.ru/web/1/openapi/list`.
@@ -30,8 +31,16 @@
 - Формат текстового сообщения:
   - `{"type":"text","message":{"text":"..."}}`
 
+## Youla Partner API (актуализировано 2026-02-18)
+- Swagger UI: `https://partner-api.youla.ru/swagger/ui`
+- Swagger JSON: `https://partner-api.youla.ru/swagger/swagger.json`
+- Авторизация: `Authorization: Bearer <token>`
+- Входящие сообщения: webhook `Ce-Type: message.incom` (модель `IncomeMessage`)
+- Исходящие сообщения: `POST /messages` (модель `Message`)
+
 ## Основной поток
 1. Poller получает batch событий Avito.
+   - Для Youla входящие приходят через webhook `POST /webhooks/youla`.
 2. Каждое событие проходит idempotency check (`events_log`).
 3. Для входящего user-сообщения сохраняется `ad/chat/message`.
 4. Router принимает решение:
@@ -48,7 +57,7 @@
    - если guardrail не сработал, генерируется ответ OpenAI;
    - в системный промпт добавляется runtime-контекст объявления (`ad_title/ad_category`) и фокус текущего диалога;
    - в системный промпт подмешиваются релевантные self-learning примеры;
-   - ответ отправляется в Avito;
+   - ответ отправляется в соответствующий канал (`Avito` или `Youla`);
    - сохраняется в `bot_replies/messages`.
 6. Если найден контакт:
    - создается лид (дедуп по `chat_id + contact_normalized`);
@@ -66,6 +75,7 @@
 - `GET /healthz`
 - `GET /api/learning/status`
 - `POST /webhooks/telegram`
+- `POST /webhooks/youla`
 - `GET /api/chats`
 - `GET /api/chats/{id}`
 - `GET /api/chats/external/{external_chat_id}/diagnostics`

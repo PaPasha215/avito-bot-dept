@@ -60,6 +60,7 @@ def build_processor(settings: Settings):
         settings=settings,
         avito_client=avito,
         openai_client=openai,
+        youla_client=None,
         telegram_client=telegram,
         router_service=router,
         prompt_service=PromptService(settings=settings),
