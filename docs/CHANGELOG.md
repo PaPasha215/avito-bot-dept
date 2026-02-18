@@ -25,6 +25,7 @@
   - добавлены документы старта Youla:
     - `docs/YOULA_ONBOARDING.md`
     - `docs/YOULA_SUPPORT_REQUEST_TEMPLATE.md`
+  - зафиксированы Youla Swagger-ссылки для валидации (`partner-api.youla.ru/swagger/rapi`, `partner-api.youla.ru/swagger/ui`).
 - Конфиг/CLI:
   - добавлены env-параметры `YOULA_*` в `.env.example`;
   - добавлена команда `make validate-youla-readiness` (`python3 -m app.cli validate-youla-readiness`).

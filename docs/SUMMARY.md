@@ -140,3 +140,6 @@
 3. В проект добавлен readiness-контур:
    - env `YOULA_*` в `.env.example`;
    - команда `make validate-youla-readiness`.
+4. Получены рабочие ссылки Youla Swagger для валидации:
+   - `https://partner-api.youla.ru/swagger/rapi`
+   - `https://partner-api.youla.ru/swagger/ui`
