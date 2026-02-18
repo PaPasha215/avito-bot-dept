@@ -188,7 +188,7 @@ def test_processor_handles_call_me_request_without_direct_number(db_session):
     assert "+7 922 128-56-86" not in reply
 
 
-def test_processor_first_reply_is_soft_and_contextual(db_session):
+def test_processor_first_reply_for_explicit_availability_query_continues_qualification(db_session):
     settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
     processor, avito, telegram, openai = build_processor(settings)
 
@@ -209,8 +209,8 @@ def test_processor_first_reply_is_soft_and_contextual(db_session):
     assert openai.reply_calls == 0
 
     reply = avito.sent_messages[-1][1].lower()
-    assert "заселения сейчас актуален" in reply
-    assert "койко-мест" in reply
+    assert "актуален" not in reply
+    assert "на какие даты" in reply
 
 
 def test_processor_first_reply_skips_redundant_actuality_for_explicit_settlement_intent(db_session):
@@ -236,3 +236,113 @@ def test_processor_first_reply_skips_redundant_actuality_for_explicit_settlement
     reply = avito.sent_messages[-1][1].lower()
     assert "актуален" not in reply
     assert "сколько человек" in reply
+
+
+def test_processor_monthly_listing_rejects_short_stay(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    processor, avito, telegram, openai = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-monthly-1",
+        chat_id="chat-monthly",
+        message_id="msg-monthly-1",
+        sender_type="user",
+        text="Можно на сутки или на выходные?",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-monthly", title="Койко-место 20 м2, Пехотинцев 7", category="Недвижимость"),
+        customer_name="Никита",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert telegram.leads_sent == 0
+    assert openai.reply_calls == 0
+
+    reply = avito.sent_messages[-1][1].lower()
+    assert "только на месяц" in reply
+    assert "помесячное заселение" in reply
+
+
+def test_processor_hostel_short_stay_price_uses_approximate_daily_rate(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    processor, avito, telegram, openai = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-hostel-1",
+        chat_id="chat-hostel",
+        message_id="msg-hostel-1",
+        sender_type="user",
+        text="Можно на воскресенье снять всю комнату за 800р?",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(
+            ad_id="ad-hostel",
+            title="Койко-место, Куйбышева 30, Сити Е",
+            category="Недвижимость",
+        ),
+        customer_name="Сергей",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert telegram.leads_sent == 0
+    assert openai.reply_calls == 0
+
+    reply = avito.sent_messages[-1][1].lower()
+    assert "от 700" in reply
+    assert "точная стоимость" in reply
+    assert "на какие даты" in reply
+
+
+def test_processor_short_stay_listing_with_daily_price_in_title_treated_as_hostel(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    processor, avito, telegram, openai = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-hostel-2",
+        chat_id="chat-hostel-2",
+        message_id="msg-hostel-2",
+        sender_type="user",
+        text="Можно на сутки, какая цена?",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(
+            ad_id="ad-hostel-2",
+            title="Койко-место 20 м2, 400 ₽ за сутки",
+            category="Недвижимость",
+        ),
+        customer_name="Сергей",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert telegram.leads_sent == 0
+    assert openai.reply_calls == 0
+
+    reply = avito.sent_messages[-1][1].lower()
+    assert "от 700" in reply
+    assert "на какие даты" in reply
+
+
+def test_processor_ignores_abuse_or_threat_messages(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    processor, avito, telegram, openai = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-abuse-1",
+        chat_id="chat-abuse",
+        message_id="msg-abuse-1",
+        sender_type="user",
+        text="Вы мошенники, я подам жалобу в прокуратуру",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-abuse", title="Койко-место 20 м2", category="Недвижимость"),
+        customer_name="Тест",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "ignored"
+    assert avito.sent_messages == []
+    assert telegram.leads_sent == 0
+    assert openai.reply_calls == 0
+
+    decisions = db_session.query(RoutingDecision).filter(RoutingDecision.chat_id.isnot(None)).all()
+    assert decisions[-1].decision == "IGNORE_SILENT"
+    assert decisions[-1].reason == "ABUSE_OR_THREAT"

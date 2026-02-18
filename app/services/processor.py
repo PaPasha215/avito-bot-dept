@@ -21,7 +21,7 @@ from app.services.retry import with_retry
 from app.services.router import RouterService
 from app.services.self_learning import SelfLearningService
 from app.services.stats_reporting import StatsReportingService
-from app.types import ChatDecision, ChatState, IncomingEvent, LeadStatus, MessageDirection
+from app.types import ChatDecision, ChatState, Domain, IncomingEvent, LeadStatus, MessageDirection
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,34 @@ class MessageProcessor:
     FULL_ROOM_RE = re.compile(
         r"(всю\s+комнат|оба\s+койк|целиком|полностью\s+комнат)",
         re.IGNORECASE,
+    )
+    SHORT_STAY_RE = re.compile(
+        r"(посуточ|сутк|на\s*\d+\s*(?:дн|дня|дней|ноч|недел)|"
+        r"на\s*(?:день|неделю|выходные|воскресенье|субботу|пятницу)|"
+        r"в\s*(?:воскресенье|субботу|пятницу)|сегодня|завтра)",
+        re.IGNORECASE,
+    )
+    PRICE_INTENT_RE = re.compile(
+        r"(цена|стоим|сколько|поч[её]м|за\s*\d+\s*(?:сут|дн|дня|дней|месяц|мес))",
+        re.IGNORECASE,
+    )
+    ABUSE_OR_THREAT_RE = re.compile(
+        r"(мошенн|обман|развод|урод|идиот|дебил|твар|сук|бля|пидор|"
+        r"угрож|в суд|прокуратур|полици|жалоб|требую|верните\s+деньги)",
+        re.IGNORECASE,
+    )
+    HOSTEL_MARKERS = (
+        "куйбышева 30",
+        "куйбышева, 30",
+        "мамина сибиряка 132",
+        "мамина-сибиряка 132",
+        "мамина сибиряка, 132",
+        "ботаническая 30",
+        "ботаническая, 30",
+        "сити е",
+        "сити-е",
+        "в гостях у бабуси",
+        "уютное местечко",
     )
 
     def __init__(
@@ -217,6 +245,19 @@ class MessageProcessor:
                 external_message_id=event.message_id,
                 payload_json=payload,
             )
+
+            if self._contains_abuse_or_threat(event.text):
+                repo.create_routing_decision(
+                    chat_id=chat.id,
+                    domain=Domain.OTHER.value,
+                    confidence=1.0,
+                    decision=ChatDecision.IGNORE_SILENT.value,
+                    reason="ABUSE_OR_THREAT",
+                )
+                repo.set_chat_state(chat.id, ChatState.IGNORED_OUT_OF_SCOPE)
+                repo.mark_event_processed(event_log.id)
+                db.commit()
+                return "ignored"
 
             recent = repo.get_recent_messages(chat.id, limit=self.settings.max_recent_messages_for_classification)
             recent_texts = [m.text for m in recent]
@@ -464,6 +505,9 @@ class MessageProcessor:
             return None
 
         has_contact = self._extract_contact(history_messages) is not None
+        is_hostel_listing = self._is_hostel_listing(ad_title=ad_title, ad_category=ad_category)
+        short_stay_request = self._is_short_stay_request(latest_inbound)
+
         if self._is_call_back_request(latest_inbound):
             if has_contact:
                 return (
@@ -473,6 +517,19 @@ class MessageProcessor:
             return (
                 "У нас многоканальная линия, поэтому напрямую до менеджера дозвониться нельзя. "
                 "Оставьте, пожалуйста, номер телефона или мессенджер, и менеджер Сергей сам свяжется с вами."
+            )
+
+        if short_stay_request and not is_hostel_listing and not has_contact:
+            return (
+                "По этому объявлению размещение доступно только на месяц. "
+                "Подскажите, пожалуйста, рассматриваете помесячное заселение?"
+            )
+
+        if short_stay_request and is_hostel_listing and self._is_price_request(latest_inbound) and not has_contact:
+            return (
+                "По этому хостелу возможно посуточное размещение. "
+                "Ориентир по койко-месту — от 700 ₽ за сутки, точная стоимость зависит от срока и загрузки. "
+                "Подскажите, пожалуйста, на какие даты планируете заезд?"
             )
 
         budget_range = self._detect_short_budget_range_thousands(latest_inbound, history_messages)
@@ -525,12 +582,18 @@ class MessageProcessor:
             f"- Заголовок объявления: {ad_title}\n"
             f"- Категория объявления: {ad_category or 'UNKNOWN'}\n"
             f"- Основной фокус текущего чата: {focus}\n"
+            "- Тон общения: дружелюбный, без давления.\n"
             "- Отвечай только в контексте этого объявления.\n"
             "- Если объявление про койко-место, не переключайся на другие форматы без прямого запроса клиента.\n"
+            "- Три хостела, где возможно посуточное размещение: Куйбышева 30 (Сити Е), Мамина-Сибиряка 132 (В гостях у бабуси), Ботаническая 30 (Уютное местечко).\n"
+            "- В хостелах при вопросе о посуточной цене давай ориентир от 700 ₽/сутки за койко-место и уточняй, что точную стоимость подтверждает менеджер.\n"
+            "- По остальным адресам предлагай помесячное размещение (не обещай посуточно).\n"
+            "- Цены в чате давай как ориентир: от/примерно, без жестких гарантий.\n"
             "- Если тип размещения неочевиден, задай один короткий уточняющий вопрос.\n"
             "- Не задавай более одного вопроса в одном сообщении.\n"
             "- Если клиент уже явно просит заселение/наличие/даты, не переспрашивай «актуально ли».\n"
             "- Не завершай диалог фразой «уточню у менеджера» без попытки собрать недостающие данные и контакт.\n"
+            "- В каждом релевантном диалоге цель: получить контакт клиента (телефон или мессенджер).\n"
             f"- {stage_rule}\n"
         )
         return f"{base_prompt}{runtime_rules}"
@@ -678,6 +741,23 @@ class MessageProcessor:
 
     def _has_budget_signal(self, text: str) -> bool:
         return bool(text and (self.CURRENCY_RE.search(text) or re.search(r"\b\d{3,6}\b", text)))
+
+    def _is_short_stay_request(self, text: str) -> bool:
+        return bool(text and self.SHORT_STAY_RE.search(text))
+
+    def _is_price_request(self, text: str) -> bool:
+        return bool(text and self.PRICE_INTENT_RE.search(text))
+
+    def _contains_abuse_or_threat(self, text: str) -> bool:
+        return bool(text and self.ABUSE_OR_THREAT_RE.search(text))
+
+    def _is_hostel_listing(self, ad_title: str, ad_category: str | None) -> bool:
+        combined = f"{ad_title} {ad_category or ''}".lower()
+        if any(marker in combined for marker in self.HOSTEL_MARKERS):
+            return True
+        if ("за сутки" in combined or "посуточ" in combined or "сутки" in combined) and "койко" in combined:
+            return True
+        return any(token in combined for token in ("хостел", "гостиниц", "гостиница", "семейн"))
 
     def _build_qualification_followup(self, text: str) -> str:
         normalized = " ".join((text or "").lower().split())
