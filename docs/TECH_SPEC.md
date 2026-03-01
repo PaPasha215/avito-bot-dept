@@ -11,15 +11,16 @@
 
 ## Компоненты
 1. `AvitoClient`: polling входящих сообщений + отправка ответов.
-2. `RouterService`: решение `REPLY` или `IGNORE_SILENT`.
-3. `DomainClassifier`: классификация домена (эвристики + OpenAI fallback).
-4. `OpenAIClient`: генерация ответа и summary.
-5. `LeadDetector`: извлечение контакта.
-6. `TelegramClient`: отправка карточек лидов.
-7. `MessageProcessor`: оркестрация полного цикла.
-8. `Poller`: периодический запуск цикла каждые 10 секунд.
-9. `SelfLearningService`: генерация обучающих примеров + canary/promotion/rollback.
-10. `StatsReportingService`: агрегирует статистику объявлений через Avito `stats/v2` и отправляет ежедневный Telegram-отчет.
+2. `YoulaClient`: отправка ответов в Youla `POST /messages` + webhook-driven входящие.
+3. `RouterService`: решение `REPLY` или `IGNORE_SILENT`.
+4. `DomainClassifier`: классификация домена (эвристики + OpenAI fallback).
+5. `OpenAIClient`: генерация ответа и summary.
+6. `LeadDetector`: извлечение контакта.
+7. `TelegramClient`: отправка карточек лидов.
+8. `MessageProcessor`: оркестрация полного цикла.
+9. `Poller`: периодический запуск цикла каждые 10 секунд.
+10. `SelfLearningService`: генерация обучающих примеров + canary/promotion/rollback.
+11. `StatsReportingService`: агрегирует статистику объявлений через Avito `stats/v2` и отправляет weekly Telegram-отчет по расписанию.
 
 ## Avito API (актуализировано 2026-02-16)
 - Список API берется из `https://developers.avito.ru/web/1/openapi/list`.
@@ -30,8 +31,16 @@
 - Формат текстового сообщения:
   - `{"type":"text","message":{"text":"..."}}`
 
+## Youla Partner API (актуализировано 2026-02-18)
+- Swagger UI: `https://partner-api.youla.ru/swagger/ui`
+- Swagger JSON: `https://partner-api.youla.ru/swagger/swagger.json`
+- Авторизация: `Authorization: Bearer <token>`
+- Входящие сообщения: webhook `Ce-Type: message.incom` (модель `IncomeMessage`)
+- Исходящие сообщения: `POST /messages` (модель `Message`)
+
 ## Основной поток
 1. Poller получает batch событий Avito.
+   - Для Youla входящие приходят через webhook `POST /webhooks/youla`.
 2. Каждое событие проходит idempotency check (`events_log`).
 3. Для входящего user-сообщения сохраняется `ad/chat/message`.
 4. Router принимает решение:
@@ -42,11 +51,13 @@
    - сначала применяются детерминированные guardrails (без LLM) для типовых сценариев:
      - короткий бюджет (`8-12`, `8р-12р`, `812`) -> уточнение "тысяч рублей в месяц";
      - "куда вам набрать" -> ответ про многоканальную линию + запрос контакта;
-     - первый ответ в новом чате -> мягкое приветствие + вопрос про актуальность заселения;
+     - если клиент уже явно пишет про заселение/наличие/даты, бот сразу продолжает квалификацию (без повтора "актуально?");
+     - short-stay допускается только для 3 хостелов (Куйбышева 30, Мамина-Сибиряка 132, Ботаническая 30), иначе бот переводит в помесячный сценарий;
+     - токсичные сообщения (оскорбления/угрозы/обвинения) -> `IGNORE_SILENT`;
    - если guardrail не сработал, генерируется ответ OpenAI;
    - в системный промпт добавляется runtime-контекст объявления (`ad_title/ad_category`) и фокус текущего диалога;
    - в системный промпт подмешиваются релевантные self-learning примеры;
-   - ответ отправляется в Avito;
+   - ответ отправляется в соответствующий канал (`Avito` или `Youla`);
    - сохраняется в `bot_replies/messages`.
 6. Если найден контакт:
    - создается лид (дедуп по `chat_id + contact_normalized`);
@@ -54,14 +65,17 @@
    - при ошибке summary/Telegram основной event не фейлится, чтобы избежать дублей ответа в Avito.
 7. Фоновая аналитика:
    - `StatsReportingService.run_if_due()` запускается после poll-цикла;
-   - запрашивает `stats/v2` по объявлениям;
-   - дополнительно подтягивает мета по item (`core/v1/accounts/{user_id}/items/{item_id}/`);
-   - отправляет компактный отчет в Telegram.
+   - при наступлении расписания (понедельник 09:00, локальный TZ) отправляет 1 отчет за неделю;
+   - период отчета: предыдущая календарная неделя (пн-вс);
+   - данные: `stats/v2` + мета item (`core/v1/accounts/{user_id}/items/{item_id}/`);
+   - фильтрация: только объявления недвижимости;
+   - отправляет отчет в Telegram на русском языке.
 
 ## API
 - `GET /healthz`
 - `GET /api/learning/status`
 - `POST /webhooks/telegram`
+- `POST /webhooks/youla`
 - `GET /api/chats`
 - `GET /api/chats/{id}`
 - `GET /api/chats/external/{external_chat_id}/diagnostics`
@@ -119,3 +133,4 @@
    - summary ограничивается по длине;
    - в карточке показываются последние 3 реплики.
 2. В MVP не используется перегруженная inline-клавиатура для лид-карточек.
+3. Отдельное ТЗ по рабочему интерфейсу менеджеров: `docs/TELEGRAM_MENU_2LEVEL_TZ.md`.

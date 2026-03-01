@@ -73,6 +73,18 @@
 - Endpoint: `POST /webhooks/telegram`
 - Рекомендуется включить `TELEGRAM_WEBHOOK_SECRET`.
 
+## Youla webhook (chat_api)
+- Endpoint: `POST /webhooks/youla`
+- Обрабатывается только событие: `Ce-Type: message.incom`
+- Авторизация исходящих в Youla:
+  - `Authorization: Bearer <YOULA_API_TOKEN>`
+- Перед включением:
+  1. `YOULA_ENABLED=true`
+  2. `YOULA_MODE=chat_api`
+  3. `YOULA_API_BASE=https://partner-api.youla.ru`
+  4. `YOULA_API_TOKEN=<token>`
+  5. (опционально) `YOULA_WEBHOOK_SECRET=<secret>`
+
 ## Команда обратной связи
 В Telegram можно отправить:
 `/feedback <external_chat_id> <TAG> <comment>`
@@ -87,21 +99,41 @@
 Сервис применяет часть правил до LLM:
 1. Короткий бюджет (`8-12`, `8р-12р`, `812`) -> бот уточняет, что это тысячи рублей в месяц.
 2. Сообщения вида "куда вам набрать" -> бот просит контакт для обратного звонка и не выдает прямой номер менеджера.
-3. Первый ответ в новом чате -> мягкое приветствие + вопрос об актуальности заселения.
+3. Если клиент уже явно пишет про заселение/наличие/даты, бот не переспрашивает "актуально ли", а продолжает квалификацию.
+4. Посуточный сценарий:
+   - доступен только для хостелов: Куйбышева 30, Мамина-Сибиряка 132, Ботаническая 30;
+   - для остальных объявлений бот предлагает помесячное размещение.
+5. Сообщения с оскорблениями/угрозами/обвинениями обрабатываются как `IGNORE_SILENT`.
 
 Если нужно поменять эти правила, правка вносится в код:
 - `/Users/home/Documents/Bot/app/services/processor.py`
 и затем деплой обычным способом.
 
 ## Ежедневная операционная сводка в Telegram
+
+## Отдельный UI-контур Telegram
+- Для упрощения рабочего интерфейса менеджеров действует отдельное ТЗ:
+  - `/Users/home/Documents/Bot/docs/TELEGRAM_MENU_2LEVEL_TZ.md`
+
+## Историческая weekly-аналитика объявлений
+Ниже weekly-параметры сохранены как исторический контекст старого формата. Текущий production checkpoint использует ежедневную операционную сводку.
 1. Включить в `.env`:
    - `STATS_REPORTING_ENABLED=true`
    - `TELEGRAM_STATS_CHAT_ID=<id целевого чата>` (или fallback на `TELEGRAM_QA_CHAT_ID` / `TELEGRAM_LEADS_CHAT_ID`)
 2. Базовые параметры:
    - `STATS_REPORT_INTERVAL_HOURS=24`
+   - production checkpoint:
+     - `STATS_REPORT_INTERVAL_HOURS=24`
+   - исторические weekly-параметры:
+     - `STATS_REPORT_WEEKDAY=1` (понедельник)
+     - `STATS_REPORT_HOUR=9`
+     - `STATS_REPORT_MINUTE=0`
+     - `STATS_REPORT_TIMEZONE=Asia/Yekaterinburg`
+     - `STATS_REPORT_MIN_VIEWS_FOR_CONVERSION=30`
+     - `STATS_REPORT_LOW_CONVERSION_THRESHOLD=3.5`
 3. Проверка вручную:
    - `make stats-report-once`
-4. Текущий формат отчета:
+4. Текущий production-формат отчета:
    - `ANOMALY`
    - `Неотвеченные`
    - `Новые контакты`

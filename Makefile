@@ -1,4 +1,4 @@
-.PHONY: run poll-once learn-once learning-status stats-report-once validate-env chat-diagnostics migrate-sqlite-to-postgres test compile docker-up
+.PHONY: run poll-once learn-once learning-status stats-report-once validate-env validate-youla-readiness chat-diagnostics migrate-sqlite-to-postgres test compile docker-up
 
 run:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -17,6 +17,9 @@ stats-report-once:
 
 validate-env:
 	python3 -m app.cli validate-env
+
+validate-youla-readiness:
+	python3 -m app.cli validate-youla-readiness
 
 chat-diagnostics:
 	@if [ -z "$(CHAT_ID)" ]; then echo "Usage: make chat-diagnostics CHAT_ID=<external_chat_id>"; exit 2; fi

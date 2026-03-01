@@ -10,11 +10,13 @@
 - Детекция контакта (телефон/мессенджер)
 - Отправка карточки лида в Telegram
 - Self-learning v1 (примеры из успешных/ошибочных диалогов)
-- Ежедневный Telegram-отчет по статистике объявлений (охват/конверсия/кандидаты на переработку)
+- Weekly Telegram-отчет по статистике объявлений (Пн 09:00, предыдущая неделя)
 - Детерминированные guardrails:
   - короткий бюджет (`8-12`, `8р-12р`, `812`) -> уточнение в тысячах/месяц;
   - "куда вам набрать" -> ответ без выдачи прямого номера;
-  - первый ответ: мягкое приветствие + вопрос об актуальности заселения
+  - если клиент уже явно пишет про заселение/наличие/даты, бот сразу продолжает квалификацию (без повторного "актуально?");
+  - посуточка только для трех хостелов (Куйбышева 30, Мамина-Сибиряка 132, Ботаническая 30), для остальных объявлений — помесячно;
+  - сообщения с оскорблениями/угрозами/обвинениями уходят в `IGNORE_SILENT`.
 - Логи роутинга и истории сообщений
 - Ретеншн 90 дней
 
@@ -73,6 +75,7 @@ docker compose up --build
 
 ```bash
 make validate-env
+make validate-youla-readiness
 make poll-once
 make learn-once
 make learning-status
@@ -83,12 +86,15 @@ make run
 
 Подробный формат через CLI:
 `python3 -m app.cli chat-diagnostics --external-chat-id <external_chat_id> --limit 200`
+Для Youla readiness:
+`python3 -m app.cli validate-youla-readiness`
 
 ## Основные endpoints
 
 - `GET /healthz`
 - `GET /api/learning/status`
 - `POST /webhooks/telegram`
+- `POST /webhooks/youla`
 - `GET /api/chats`
 - `GET /api/chats/{id}`
 - `GET /api/chats/external/{external_chat_id}/diagnostics`
@@ -109,6 +115,10 @@ make run
 
 Официальный источник схемы messenger:
 - `https://developers.avito.ru/web/1/openapi/info/messenger`
+
+Для Youla (chat_api):
+- входящие сообщения: webhook `POST /webhooks/youla` с `Ce-Type: message.incom`;
+- исходящие сообщения: `POST /messages` на `YOULA_API_BASE` с `Authorization: Bearer <token>`.
 
 Если Telegram возвращает `Bad Request: chat not found`, нужно:
 1. Добавить бота в целевой чат.
