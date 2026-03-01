@@ -24,6 +24,8 @@ def test_heartbeat_sends_ok_message_when_due(db_session):
         bot_health_enabled=True,
         bot_health_interval_minutes=30,
         bot_health_chat_id="-7001",
+        bot_health_send_ok_messages=True,
+        bot_health_daily_report_enabled=False,
     )
     service = BotHealthHeartbeatService(settings=settings, telegram_client=telegram)
 

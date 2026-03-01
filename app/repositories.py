@@ -104,7 +104,7 @@ class Repository:
 
         chat = self.db.get(Chat, chat_id)
         if chat:
-            chat.last_message_at = utcnow()
+            chat.last_message_at = created_at or msg.created_at
         self.db.flush()
         return msg
 

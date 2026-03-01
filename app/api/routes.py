@@ -117,6 +117,12 @@ def _dashboard_credentials(settings: Settings) -> dict[str, tuple[str, str]]:
     return creds
 
 
+def _dashboard_security_error(settings: Settings) -> str | None:
+    if settings.dashboard_uses_default_session_secret():
+        return "dashboard session secret is not configured"
+    return None
+
+
 def _dashboard_cookie_secure(settings: Settings) -> bool:
     return settings.environment.strip().lower() in {"prod", "production", "stage", "staging"}
 
@@ -137,6 +143,8 @@ def _create_dashboard_session_token(username: str, role: str, settings: Settings
 
 def _read_dashboard_session(request: Request) -> dict | None:
     settings = _settings_from_app(request.app)
+    if _dashboard_security_error(settings) is not None:
+        return None
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token or "." not in token:
         return None
@@ -170,6 +178,10 @@ def _read_dashboard_session(request: Request) -> dict | None:
 
 
 def _require_dashboard_session(request: Request, allowed_roles: set[str] | None = None) -> dict:
+    settings = _settings_from_app(request.app)
+    security_error = _dashboard_security_error(settings)
+    if security_error is not None:
+        raise HTTPException(status_code=503, detail=security_error)
     session = _read_dashboard_session(request)
     if session is None:
         raise HTTPException(status_code=401, detail="dashboard_auth_required")
@@ -802,6 +814,9 @@ def cabinet_page(request: Request):
 @router.post("/api/cabinet/login", response_model=CabinetAuthResponse)
 def cabinet_login(request: Request, body: CabinetLoginRequest):
     settings = _settings_from_app(request.app)
+    security_error = _dashboard_security_error(settings)
+    if security_error is not None:
+        raise HTTPException(status_code=503, detail=security_error)
     creds = _dashboard_credentials(settings)
     if not creds:
         raise HTTPException(

@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-03-01 - quality hardening and verified test baseline
+
+### Fixed
+- Закрыт риск self-learning для `WRONG_DOMAIN`:
+  - negative lesson больше не учит модель отвечать там, где правило требует молчать.
+- Кабинет больше не работает с дефолтным `DASHBOARD_SESSION_SECRET`:
+  - добавлен runtime guard;
+  - `validate-env` теперь требует явный `DASHBOARD_SESSION_SECRET`, если кабинет включен.
+- Daily operational report больше не отмечается как выполненный, если Telegram chat для отправки не настроен.
+- Усилен router-guard для off-topic внутри real-estate объявлений:
+  - авто-тематика;
+  - нецелевое использование жилья;
+  - часть сервисных/поставщицких сообщений.
+- Усилен budget/price detector:
+  - корректно распознаются короткие форматы вроде `800р`, `20к`.
+
+### Changed
+- `chat.last_message_at` теперь хранит фактическое время сообщения, а не текущее серверное время при записи.
+- Актуализированы тесты `stats_reporting`, `cabinet`, `heartbeat`, `processor`, `router`, `self_learning` под текущий рабочий контракт.
+
+### Verified
+- Установлен `pytest`.
+- Полный автотестовый прогон успешен:
+  - `python3 -m pytest`
+  - результат: `40 passed`
+
 ## 2026-03-01 - prod sync checkpoint
 
 ### Stable state

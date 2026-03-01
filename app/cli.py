@@ -26,6 +26,9 @@ def cmd_validate_env() -> int:
     }
 
     missing = [k for k, v in required.items() if not v]
+    if settings.dashboard_owner_username or settings.dashboard_manager_username:
+        if settings.dashboard_uses_default_session_secret():
+            missing.append("DASHBOARD_SESSION_SECRET")
     if missing:
         print("Missing required env vars:")
         for key in missing:

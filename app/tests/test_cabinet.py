@@ -73,6 +73,7 @@ def test_cabinet_login_and_me():
         polling_enabled=False,
         dashboard_owner_username="owner",
         dashboard_owner_password="owner-pass",
+        dashboard_session_secret="test-secret",
     )
     app = _build_app(settings=settings, session_factory=session_factory)
     client = TestClient(app)
@@ -95,6 +96,7 @@ def test_cabinet_leads_and_status_update():
         polling_enabled=False,
         dashboard_owner_username="owner",
         dashboard_owner_password="owner-pass",
+        dashboard_session_secret="test-secret",
     )
     app = _build_app(settings=settings, session_factory=session_factory)
     client = TestClient(app)
@@ -138,3 +140,18 @@ def test_cabinet_leads_and_status_update():
     done_task = client.patch(f"/api/cabinet/tasks/{task_id}", json={"status": "DONE"})
     assert done_task.status_code == 200
     assert done_task.json()["status"] == "DONE"
+
+
+def test_cabinet_rejects_default_session_secret():
+    session_factory = _build_session_factory()
+    settings = Settings(
+        polling_enabled=False,
+        dashboard_owner_username="owner",
+        dashboard_owner_password="owner-pass",
+    )
+    app = _build_app(settings=settings, session_factory=session_factory)
+    client = TestClient(app)
+
+    login = client.post("/api/cabinet/login", json={"username": "owner", "password": "owner-pass"})
+    assert login.status_code == 503
+    assert "session secret" in login.json()["detail"]

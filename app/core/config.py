@@ -147,6 +147,9 @@ class Settings(BaseSettings):
     dashboard_session_secret: str = "change-this-dashboard-secret"
     dashboard_session_ttl_hours: int = 24
 
+    def dashboard_uses_default_session_secret(self) -> bool:
+        return self.dashboard_session_secret.strip() == "change-this-dashboard-secret"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -1084,13 +1084,27 @@ class MessageProcessor:
         return bool(text and self.PEOPLE_INTENT_RE.search(text))
 
     def _has_budget_signal(self, text: str) -> bool:
-        return bool(text and (self.CURRENCY_RE.search(text) or re.search(r"\b\d{3,6}\b", text)))
+        return bool(
+            text
+            and (
+                self.CURRENCY_RE.search(text)
+                or re.search(r"\b\d{3,6}\b", text)
+                or re.search(r"\d{1,6}\s*(?:₽|р|руб(?:\.|ля|лей)?)", text, re.IGNORECASE)
+                or re.search(r"\d{1,3}\s*к\b", text, re.IGNORECASE)
+            )
+        )
 
     def _is_short_stay_request(self, text: str) -> bool:
         return bool(text and self.SHORT_STAY_RE.search(text))
 
     def _is_price_request(self, text: str) -> bool:
-        return bool(text and self.PRICE_INTENT_RE.search(text))
+        if not text:
+            return False
+        normalized = " ".join(text.lower().split())
+        return bool(
+            self.PRICE_INTENT_RE.search(normalized)
+            or ("за " in normalized and self._has_budget_signal(normalized))
+        )
 
     def _contains_abuse_or_threat(self, text: str) -> bool:
         return bool(text and self.ABUSE_OR_THREAT_RE.search(text))

@@ -460,8 +460,9 @@ def test_processor_youla_service_offer_gets_supplier_question(db_session):
     assert openai.reply_calls == 0
     assert len(youla.sent_messages) == 1
     text = youla.sent_messages[0]["text"].lower()
-    assert "расскажите подробнее" in text
-    assert "оставить контактные данные" in text
+    assert "спасибо за ваше предложение" in text
+    assert "передам эту информацию менеджеру" in text
+    assert "номер телефона" in text or "ссылку для связи" in text
     assert "вопрос по заселению" not in text
 
 
@@ -537,7 +538,8 @@ def test_processor_first_reply_skips_redundant_actuality_for_explicit_settlement
 
     reply = avito.sent_messages[-1][1].lower()
     assert "актуален" not in reply
-    assert "сколько человек" in reply
+    assert "только на месяц" in reply
+    assert "помесячное заселение" in reply
 
 
 def test_processor_apologizes_for_long_wait_and_rechecks_actuality(db_session):
