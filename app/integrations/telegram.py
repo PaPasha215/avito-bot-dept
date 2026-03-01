@@ -52,6 +52,9 @@ class TelegramClient:
         lead_id: int,
         ad_title: str,
         ad_url: str | None,
+        marketplace: str,
+        chat_url: str | None,
+        external_chat_id: str | None,
         customer_name: str | None,
         contact_raw: str,
         summary: str,
@@ -59,13 +62,18 @@ class TelegramClient:
         status: LeadStatus = LeadStatus.NEW,
     ) -> None:
         summary_compact = self._trim_text(summary, limit=700)
+        source_label = self._marketplace_label(marketplace)
         lines = [
-            f"Лид Avito #{lead_id}",
+            f"Заявка на {source_label} #{lead_id}:",
             "",
-            f"Объявление: {ad_title}",
+            ad_title,
         ]
+        if external_chat_id:
+            lines.append(f"чат ID: {external_chat_id}")
+        if chat_url:
+            lines.extend(["Чат", chat_url])
         if ad_url:
-            lines.append(f"Ссылка: {ad_url}")
+            lines.extend(["Объявление", ad_url])
         if customer_name:
             lines.append(f"Имя: {customer_name}")
         lines.extend(
@@ -83,6 +91,15 @@ class TelegramClient:
             lines.append(f"- {self._trim_text(item, limit=220)}")
 
         self.send_message(leads_chat_id, "\n".join(lines))
+
+    @staticmethod
+    def _marketplace_label(marketplace: str | None) -> str:
+        value = (marketplace or "").strip().lower()
+        if value == "youla":
+            return "Youla"
+        if value == "avito":
+            return "Avito"
+        return (marketplace or "Источник").strip() or "Источник"
 
     @staticmethod
     def _trim_text(text: str, limit: int) -> str:

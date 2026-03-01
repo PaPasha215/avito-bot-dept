@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-03-01 - prod sync checkpoint
+
+### Stable state
+- Локальный workspace синхронизирован с фактическим продовым кодом на VPS.
+- Прод-контур на VPS поднят и отвечает, `app` контейнер пересобран и запущен успешно.
+- Ежедневная Telegram-сводка переведена на операционные метрики бота:
+  - `ANOMALY`
+  - `Неотвеченные`
+  - `Новые контакты`
+- Ручной форс `stats-report-once` на проде выполнен успешно, Telegram вернул `HTTP 200`.
+- Последняя подтвержденная отправка daily report зафиксирована в БД:
+  - `stats_report_last_run_at=2026-03-01T08:50:46.304862+00:00`
+- Дублирующий daily-report из heartbeat отключен на проде, срочные alert'ы оставлены только для необработанных входящих и ошибок poller.
+
+### Added
+- Синхронизированы в локальный репозиторий продовые файлы, которых раньше не было локально:
+  - `app/integrations/youla.py`
+  - `app/integrations/crm_ingest.py`
+  - `app/services/heartbeat.py`
+  - `app/tests/test_cabinet.py`
+  - `app/tests/test_heartbeat.py`
+
+### Changed
+- `StatsReportingService` больше не отправляет weekly analytics по объявлениям, а формирует короткую ежедневную операционную сводку по данным БД бота.
+- `app/cli.py` (`stats-report-once`) возвращает новые поля:
+  - `anomaly_count`
+  - `unanswered_count`
+  - `new_contacts_count`
+- Локальный `.env` снова соответствует текущей схеме `Settings`, `validate-env` проходит штатно.
+
 ## 2026-02-17 - MVP v1.0 checkpoint
 
 ### Stable state

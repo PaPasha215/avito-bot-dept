@@ -83,17 +83,23 @@
    - summary сокращается;
    - в карточку попадают последние 3 реплики вместо 5.
 
-## Ежедневная аналитика объявлений (2026-02-17)
-1. Добавлен `StatsReportingService` с автозапуском из poller (по расписанию).
-2. Отчет отправляется в Telegram и включает:
-   - топ объявлений по охвату;
-   - топ по конверсии `views -> contacts` (при достаточном числе просмотров);
-   - список объявлений с низкой конверсией для переработки.
-3. Настройки:
-   - `STATS_REPORTING_ENABLED=true/false`
-   - `STATS_REPORT_INTERVAL_HOURS`
-   - `STATS_REPORT_LOOKBACK_DAYS`
-   - `STATS_REPORT_MIN_VIEWS_FOR_CONVERSION`
-   - `STATS_REPORT_LOW_CONVERSION_THRESHOLD`
-   - `TELEGRAM_STATS_CHAT_ID` (приоритетный чат; fallback: QA -> leads).
-4. Добавлен ручной запуск отчета: `make stats-report-once`.
+## Операционный checkpoint (2026-03-01)
+1. Локальный код синхронизирован с фактическим состоянием продового `/opt/Bot`.
+2. На проде подтвержден рабочий цикл после пересборки контейнера:
+   - `polling` активен;
+   - Telegram отправка проходит (`HTTP 200`);
+   - `stats-report-once` отрабатывает вручную без ошибок.
+3. `StatsReportingService` теперь используется как короткая ежедневная операционная сводка, а не отчет по объявлениям.
+4. Состав ежедневной сводки:
+   - `ANOMALY`
+   - `Неотвеченные`
+   - `Новые контакты`
+5. Зафиксированная отправка на проде:
+   - `report_date=2026-03-01`
+   - `anomaly_count=0`
+   - `unanswered_count=0`
+   - `new_contacts_count=5`
+6. Heartbeat оставлен только для срочных alert'ов:
+   - ошибки poller;
+   - необработанные входящие;
+   - daily-report в heartbeat отключен, чтобы не дублировать сводку.

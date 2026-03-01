@@ -14,7 +14,7 @@
   - `make learn-once`
 - Для просмотра статуса самообучения:
   - `make learning-status`
-- Для одноразового отчета по статистике объявлений:
+- Для одноразовой ежедневной операционной сводки:
   - `make stats-report-once`
 - Автозапуск:
   - self-learning также запускается автоматически из poller раз в `SELF_LEARNING_INTERVAL_HOURS`.
@@ -93,18 +93,22 @@
 - `/Users/home/Documents/Bot/app/services/processor.py`
 и затем деплой обычным способом.
 
-## Ежедневный отчет по статистике объявлений
+## Ежедневная операционная сводка в Telegram
 1. Включить в `.env`:
    - `STATS_REPORTING_ENABLED=true`
    - `TELEGRAM_STATS_CHAT_ID=<id целевого чата>` (или fallback на `TELEGRAM_QA_CHAT_ID` / `TELEGRAM_LEADS_CHAT_ID`)
 2. Базовые параметры:
    - `STATS_REPORT_INTERVAL_HOURS=24`
-   - `STATS_REPORT_LOOKBACK_DAYS=14`
-   - `STATS_REPORT_MIN_VIEWS_FOR_CONVERSION=30`
-   - `STATS_REPORT_LOW_CONVERSION_THRESHOLD=3.5`
 3. Проверка вручную:
    - `make stats-report-once`
-4. В автомате отчет запускается в процессе poller раз в заданный интервал.
+4. Текущий формат отчета:
+   - `ANOMALY`
+   - `Неотвеченные`
+   - `Новые контакты`
+5. В автомате отчет запускается в процессе poller раз в заданный интервал.
+6. На проде с checkpoint от `2026-03-01` дублирующий daily-report из heartbeat отключен:
+   - `BOT_HEALTH_DAILY_REPORT_ENABLED=false`
+   - срочные alert'ы heartbeat оставлены только для poller failures и необработанных входящих.
 
 ## Перенос на VPS (Beget)
 1. Создать сервер и установить Docker/Compose.

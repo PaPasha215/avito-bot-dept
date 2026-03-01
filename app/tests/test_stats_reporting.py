@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from app.core.config import Settings
 from app.repositories import Repository
 from app.services.stats_reporting import StatsReportingService
@@ -39,7 +41,7 @@ class DummyAvito:
     def get_account_item(self, item_id):
         return {
             "status": "active",
-            "url": f"https://www.avito.ru/item/{item_id}",
+            "url": f"https://www.avito.ru/ekaterinburg/komnaty/koyko-mesto_20_m_{item_id}",
         }
 
 
@@ -51,6 +53,15 @@ class DummyTelegram:
         self.messages.append((chat_id, text))
 
 
+class FixedNowStatsReportingService(StatsReportingService):
+    def __init__(self, *args, fixed_now_utc: datetime, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._fixed_now_utc = fixed_now_utc
+
+    def _now_utc(self) -> datetime:
+        return self._fixed_now_utc
+
+
 def test_stats_report_once_sends_message(db_session):
     settings = Settings(
         polling_enabled=False,
@@ -58,6 +69,7 @@ def test_stats_report_once_sends_message(db_session):
         telegram_stats_chat_id="-100500",
         stats_report_min_views_for_conversion=30,
         stats_report_low_conversion_threshold=3.5,
+        stats_report_timezone="UTC",
     )
     tg = DummyTelegram()
     service = StatsReportingService(
@@ -74,20 +86,27 @@ def test_stats_report_once_sends_message(db_session):
     assert "Топ по охвату" in payload
     assert "Кандидаты на переработку" in payload
     assert "#1002" in payload
+    assert "просмотры" in payload
+    assert "конверсия" in payload
 
 
-def test_stats_report_run_if_due_respects_interval(db_session):
+def test_stats_report_run_if_due_weekly_schedule(db_session):
+    fixed_now = datetime(2026, 2, 16, 9, 5, tzinfo=timezone.utc)  # Monday
     settings = Settings(
         polling_enabled=False,
         stats_reporting_enabled=True,
         telegram_stats_chat_id="-100500",
-        stats_report_interval_hours=24,
+        stats_report_weekday=1,
+        stats_report_hour=9,
+        stats_report_minute=0,
+        stats_report_timezone="UTC",
     )
     tg = DummyTelegram()
-    service = StatsReportingService(
+    service = FixedNowStatsReportingService(
         settings=settings,
         avito_client=DummyAvito(),
         telegram_client=tg,
+        fixed_now_utc=fixed_now,
     )
 
     first = service.run_if_due(db_session)

@@ -1,13 +1,32 @@
 from __future__ import annotations
 
+import base64
+import hmac
+import json
+import logging
+from datetime import datetime, timezone
+from hashlib import sha256
+
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.db import SessionLocal
 from app.repositories import Repository
 from app.schemas import (
+    CabinetAuthResponse,
+    CabinetFunnelResponse,
+    CabinetLeadListItem,
+    CabinetLeadDetailResponse,
+    CabinetLeadMessageItem,
+    CabinetLeadTaskItem,
+    CabinetLeadsResponse,
+    CabinetLeadStatusUpdateRequest,
+    CabinetLoginRequest,
+    CabinetMeResponse,
+    CabinetTaskCreateRequest,
+    CabinetTaskUpdateRequest,
     BotReplyItem,
     ChatDetailResponse,
     ChatDiagnosticsResponse,
@@ -25,8 +44,23 @@ from app.schemas import (
     RoutingDecisionItem,
     TelegramWebhookResponse,
 )
+from app.types import AdContext, IncomingEvent
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+SESSION_COOKIE_NAME = "rk_cab_session"
+CABINET_STATUS_ORDER = [
+    "NEW",
+    "CONTACT_RECEIVED",
+    "CALL_NEEDED",
+    "PAYMENT_PENDING",
+    "PAID",
+    "CHECKED_IN",
+    "LOST",
+]
+CABINET_ALLOWED_STATUSES = set(CABINET_STATUS_ORDER + ["IN_PROGRESS", "WON", "SPAM"])
+CABINET_TASK_STATUS_ORDER = ["OPEN", "DONE", "CANCELLED"]
+CABINET_ALLOWED_TASK_STATUSES = set(CABINET_TASK_STATUS_ORDER)
 
 
 def get_db():
@@ -41,10 +75,938 @@ def _settings_from_app(app: FastAPI) -> Settings:
     return app.state.container.settings
 
 
+def _parse_ce_time(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    normalized = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _get_path(payload: dict, path: str):
+    current = payload
+    for chunk in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(chunk)
+    return current
+
+
+def _pick_str(payload: dict, *paths: str) -> str:
+    for path in paths:
+        value = _get_path(payload, path)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _dashboard_credentials(settings: Settings) -> dict[str, tuple[str, str]]:
+    creds: dict[str, tuple[str, str]] = {}
+    if settings.dashboard_owner_username and settings.dashboard_owner_password:
+        creds[settings.dashboard_owner_username] = ("owner", settings.dashboard_owner_password)
+    if settings.dashboard_manager_username and settings.dashboard_manager_password:
+        creds[settings.dashboard_manager_username] = ("manager", settings.dashboard_manager_password)
+    return creds
+
+
+def _dashboard_cookie_secure(settings: Settings) -> bool:
+    return settings.environment.strip().lower() in {"prod", "production", "stage", "staging"}
+
+
+def _create_dashboard_session_token(username: str, role: str, settings: Settings) -> str:
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    exp_ts = now_ts + max(1, int(settings.dashboard_session_ttl_hours)) * 3600
+    payload = {"u": username, "r": role, "exp": exp_ts}
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    raw_b64 = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    sig = hmac.new(
+        settings.dashboard_session_secret.encode("utf-8"),
+        raw,
+        sha256,
+    ).hexdigest()
+    return f"{raw_b64}.{sig}"
+
+
+def _read_dashboard_session(request: Request) -> dict | None:
+    settings = _settings_from_app(request.app)
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token or "." not in token:
+        return None
+    raw_b64, sig = token.rsplit(".", 1)
+    try:
+        padded = raw_b64 + "=" * (-len(raw_b64) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+    except Exception:  # noqa: BLE001
+        return None
+
+    expected_sig = hmac.new(
+        settings.dashboard_session_secret.encode("utf-8"),
+        raw,
+        sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        return None
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    exp = int(payload.get("exp") or 0)
+    if exp <= int(datetime.now(timezone.utc).timestamp()):
+        return None
+    username = str(payload.get("u") or "").strip()
+    role = str(payload.get("r") or "").strip()
+    if not username or role not in {"owner", "manager"}:
+        return None
+    return {"username": username, "role": role, "exp": exp}
+
+
+def _require_dashboard_session(request: Request, allowed_roles: set[str] | None = None) -> dict:
+    session = _read_dashboard_session(request)
+    if session is None:
+        raise HTTPException(status_code=401, detail="dashboard_auth_required")
+    if allowed_roles and session["role"] not in allowed_roles:
+        raise HTTPException(status_code=403, detail="dashboard_forbidden")
+    return session
+
+
+def _lead_row_to_cabinet_item(repo: Repository, lead, chat, ad) -> CabinetLeadListItem:
+    return CabinetLeadListItem(
+        id=lead.id,
+        source=repo.lead_source_from_external_chat_id(chat.external_chat_id),
+        external_chat_id=chat.external_chat_id,
+        ad_title=ad.title,
+        ad_url=ad.url,
+        contact_raw=lead.contact_raw,
+        contact_normalized=lead.contact_normalized,
+        summary=lead.summary,
+        status=lead.status,
+        sent_to_tg_at=lead.sent_to_tg_at,
+        created_at=lead.created_at,
+    )
+
+
+def _lead_task_to_item(task) -> CabinetLeadTaskItem:
+    return CabinetLeadTaskItem(
+        id=task.id,
+        title=task.title,
+        status=task.status,
+        due_at=task.due_at,
+        completed_at=task.completed_at,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+    )
+
+
 @router.get("/healthz", response_model=HealthResponse)
 def healthz(request: Request):
     settings = _settings_from_app(request.app)
     return HealthResponse(status="ok", polling_enabled=settings.polling_enabled, environment=settings.environment)
+
+
+@router.get("/cabinet/login")
+def cabinet_login_page(request: Request):
+    session = _read_dashboard_session(request)
+    if session is not None:
+        return RedirectResponse(url="/cabinet", status_code=302)
+
+    html = """
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RentKontrol Cabinet Login</title>
+    <style>
+      :root {
+        --bg: radial-gradient(circle at 10% 10%, #ffe7cc, #f4f6ff 45%, #e4f6f0 100%);
+        --surface: rgba(255, 255, 255, 0.82);
+        --ink: #1c2633;
+        --muted: #5a6677;
+        --accent: #114b8b;
+        --accent-2: #2f7dbb;
+        --danger: #b0203a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+      }
+      .card {
+        width: min(460px, 92vw);
+        border-radius: 20px;
+        background: var(--surface);
+        border: 1px solid rgba(17, 75, 139, 0.12);
+        box-shadow: 0 20px 60px rgba(16, 34, 57, 0.15);
+        padding: 28px;
+      }
+      h1 { margin: 0 0 8px; font-size: 28px; }
+      p { margin: 0 0 20px; color: var(--muted); }
+      label { display: block; margin: 10px 0 6px; font-weight: 600; }
+      input {
+        width: 100%;
+        padding: 12px 14px;
+        border-radius: 10px;
+        border: 1px solid rgba(17, 75, 139, 0.22);
+        font-size: 16px;
+        outline: none;
+      }
+      button {
+        margin-top: 16px;
+        width: 100%;
+        border: none;
+        border-radius: 12px;
+        padding: 12px 16px;
+        color: white;
+        font-weight: 700;
+        font-size: 16px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        cursor: pointer;
+      }
+      .msg { margin-top: 12px; min-height: 22px; color: var(--danger); font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Вход в кабинет</h1>
+      <p>Owner/Manager dashboard для воронки и лидов.</p>
+      <form id="login-form">
+        <label for="username">Логин</label>
+        <input id="username" name="username" autocomplete="username" required />
+        <label for="password">Пароль</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+        <button type="submit">Войти</button>
+        <div class="msg" id="msg"></div>
+      </form>
+    </main>
+    <script>
+      const form = document.getElementById("login-form");
+      const msg = document.getElementById("msg");
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        msg.textContent = "";
+        const username = document.getElementById("username").value.trim();
+        const password = document.getElementById("password").value;
+        const resp = await fetch("/api/cabinet/login", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({username, password})
+        });
+        if (!resp.ok) {
+          let detail = "Ошибка входа";
+          try {
+            const payload = await resp.json();
+            if (payload && payload.detail) detail = payload.detail;
+          } catch (_) {}
+          msg.textContent = detail;
+          return;
+        }
+        location.href = "/cabinet";
+      });
+    </script>
+  </body>
+</html>
+"""
+    return HTMLResponse(content=html)
+
+
+@router.get("/cabinet")
+def cabinet_page(request: Request):
+    session = _read_dashboard_session(request)
+    if session is None:
+        return RedirectResponse(url="/cabinet/login", status_code=302)
+
+    html = """
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RentKontrol Cabinet</title>
+    <style>
+      :root {
+        --bg: linear-gradient(130deg, #f7fbff 0%, #f2f9f4 45%, #fff8ef 100%);
+        --surface: #ffffff;
+        --ink: #1d2a3a;
+        --muted: #607086;
+        --line: #d7e2ec;
+        --accent: #0e5ca8;
+        --warn: #f8a03a;
+        --ok: #1f8f56;
+        --bad: #c13746;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      .wrap { max-width: 1200px; margin: 0 auto; padding: 22px; }
+      .top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      h1 { margin: 0; font-size: 30px; }
+      .meta { color: var(--muted); margin-top: 5px; font-size: 14px; }
+      .btn {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: white;
+        color: var(--ink);
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+      }
+      .card .k { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+      .card .v { font-size: 28px; font-weight: 800; }
+      .card .v.ok { color: var(--ok); }
+      .card .v.bad { color: var(--bad); }
+      .filters {
+        display: grid;
+        grid-template-columns: 1fr 180px 180px 130px;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      input, select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-size: 14px;
+        background: white;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+        border-radius: 14px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+      }
+      th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
+      th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); background: #f8fbff; }
+      .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; }
+      .pager { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+      .state { border-radius: 999px; padding: 3px 10px; display: inline-block; font-size: 12px; border: 1px solid var(--line); }
+      .detail {
+        margin-top: 14px;
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 10px;
+      }
+      .panel {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px;
+      }
+      .panel h3 { margin: 0 0 8px; font-size: 16px; }
+      .timeline {
+        max-height: 320px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 8px;
+      }
+      .msg-in, .msg-out {
+        padding: 8px;
+        border-radius: 8px;
+        margin-bottom: 6px;
+        font-size: 13px;
+      }
+      .msg-in { background: #eef7ff; border: 1px solid #d1e7ff; }
+      .msg-out { background: #f2fbf4; border: 1px solid #d9f0df; }
+      .msg-meta { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+      .tasks {
+        max-height: 220px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 8px;
+      }
+      .task { border: 1px solid var(--line); border-radius: 10px; padding: 8px; margin-bottom: 6px; }
+      .task-head { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+      .task-meta { font-size: 12px; color: var(--muted); }
+      .task-form { display: grid; grid-template-columns: 1fr 180px 110px; gap: 8px; margin-top: 8px; }
+      @media (max-width: 980px) {
+        .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .filters { grid-template-columns: 1fr 1fr; }
+        .detail { grid-template-columns: 1fr; }
+        .task-form { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="top">
+        <div>
+          <h1>RentKontrol Cabinet</h1>
+          <div class="meta" id="who">loading...</div>
+        </div>
+        <button class="btn" id="logout">Выйти</button>
+      </div>
+
+      <section class="cards">
+        <article class="card"><div class="k">Всего лидов</div><div class="v" id="k-total">0</div></article>
+        <article class="card"><div class="k">Оплачено</div><div class="v ok" id="k-paid">0</div></article>
+        <article class="card"><div class="k">Неуспешно</div><div class="v bad" id="k-lost">0</div></article>
+        <article class="card"><div class="k">Конверсия в оплату</div><div class="v" id="k-conv">0%</div></article>
+      </section>
+
+      <section class="filters">
+        <input id="q" placeholder="Поиск: контакт, summary, объявление, chat id" />
+        <select id="status"><option value="">Все статусы</option></select>
+        <select id="source"><option value="">Все источники</option></select>
+        <button class="btn" id="apply">Применить</button>
+      </section>
+
+      <section>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Источник</th>
+              <th>Объявление</th>
+              <th>Контакт</th>
+              <th>Summary</th>
+              <th>Статус</th>
+              <th>Создан</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </section>
+
+      <div class="pager">
+        <button class="btn" id="prev">Назад</button>
+        <button class="btn" id="next">Вперед</button>
+        <span id="page-info"></span>
+      </div>
+
+      <section class="detail">
+        <article class="panel">
+          <h3 id="lead-title">Карточка лида</h3>
+          <div class="meta" id="lead-meta">Выбери лид в таблице.</div>
+          <div class="timeline" id="timeline"></div>
+        </article>
+        <article class="panel">
+          <h3>Задачи и напоминания</h3>
+          <div class="tasks" id="tasks"></div>
+          <div class="task-form">
+            <input id="task-title" placeholder="Новая задача: перезвонить, уточнить оплату..." />
+            <input id="task-due" type="datetime-local" />
+            <button class="btn" id="task-add">Добавить</button>
+          </div>
+        </article>
+      </section>
+    </div>
+
+    <script>
+      const limit = 20;
+      let offset = 0;
+      let funnelCache = null;
+      let selectedLeadId = null;
+      const statusValues = ["NEW","CONTACT_RECEIVED","CALL_NEEDED","PAYMENT_PENDING","PAID","CHECKED_IN","LOST","IN_PROGRESS","WON","SPAM"];
+      const taskStatusValues = ["OPEN","DONE","CANCELLED"];
+
+      function esc(text) {
+        return (text || "").replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',\"'\":'&#39;'}[m]));
+      }
+
+      function fmtDate(value) {
+        if (!value) return "-";
+        try { return new Date(value).toLocaleString(); } catch (_) { return value; }
+      }
+
+      function toInputDateTime(value) {
+        if (!value) return "";
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return "";
+        const pad = (n) => String(n).padStart(2, "0");
+        const yyyy = d.getFullYear();
+        const mm = pad(d.getMonth() + 1);
+        const dd = pad(d.getDate());
+        const hh = pad(d.getHours());
+        const mi = pad(d.getMinutes());
+        return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+      }
+
+      function renderLeadDetail(data) {
+        const lead = data.lead;
+        document.getElementById("lead-title").textContent = `Лид #${lead.id} — ${lead.ad_title || "-"}`;
+        document.getElementById("lead-meta").textContent = `${lead.source} | ${lead.status} | ${lead.external_chat_id}`;
+
+        const timeline = document.getElementById("timeline");
+        timeline.innerHTML = "";
+        if (!data.messages.length) {
+          timeline.innerHTML = '<div class="task-meta">Сообщений пока нет.</div>';
+        } else {
+          for (const item of data.messages) {
+            const cls = item.direction === "INBOUND" ? "msg-in" : "msg-out";
+            const who = item.direction === "INBOUND" ? "Клиент" : "Бот/Менеджер";
+            const div = document.createElement("div");
+            div.className = cls;
+            div.innerHTML = `<div class="msg-meta">${who} • ${fmtDate(item.created_at)}</div><div>${esc(item.text || "")}</div>`;
+            timeline.appendChild(div);
+          }
+        }
+
+        const tasks = document.getElementById("tasks");
+        tasks.innerHTML = "";
+        if (!data.tasks.length) {
+          tasks.innerHTML = '<div class="task-meta">Задач пока нет.</div>';
+        } else {
+          for (const task of data.tasks) {
+            const row = document.createElement("div");
+            row.className = "task";
+            row.innerHTML = `
+              <div class="task-head">
+                <strong>${esc(task.title)}</strong>
+                <select data-task-id="${task.id}" class="task-status">
+                  ${taskStatusValues.map((s) => `<option value="${s}" ${s===task.status?"selected":""}>${s}</option>`).join("")}
+                </select>
+              </div>
+              <div class="task-meta">Дедлайн: ${fmtDate(task.due_at)}</div>
+              <div class="task-meta">Обновлено: ${fmtDate(task.updated_at)}</div>
+            `;
+            tasks.appendChild(row);
+          }
+        }
+        bindTaskStatusControls();
+      }
+
+      async function loadLeadDetail(leadId) {
+        const resp = await fetch(`/api/cabinet/leads/${leadId}`);
+        if (!resp.ok) {
+          alert("Не удалось загрузить карточку лида");
+          return;
+        }
+        const data = await resp.json();
+        selectedLeadId = leadId;
+        renderLeadDetail(data);
+      }
+
+      async function createTaskForSelectedLead() {
+        if (!selectedLeadId) {
+          alert("Сначала открой лид");
+          return;
+        }
+        const title = document.getElementById("task-title").value.trim();
+        const dueRaw = document.getElementById("task-due").value;
+        if (!title) {
+          alert("Введи текст задачи");
+          return;
+        }
+        const payload = {title};
+        if (dueRaw) payload.due_at = new Date(dueRaw).toISOString();
+        const resp = await fetch(`/api/cabinet/leads/${selectedLeadId}/tasks`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+          alert("Не удалось создать задачу");
+          return;
+        }
+        document.getElementById("task-title").value = "";
+        document.getElementById("task-due").value = "";
+        await loadLeadDetail(selectedLeadId);
+      }
+
+      function bindTaskStatusControls() {
+        document.querySelectorAll(".task-status").forEach((el) => {
+          el.addEventListener("change", async () => {
+            const taskId = el.getAttribute("data-task-id");
+            const status = el.value;
+            const resp = await fetch(`/api/cabinet/tasks/${taskId}`, {
+              method: "PATCH",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({status}),
+            });
+            if (!resp.ok) {
+              alert("Не удалось обновить задачу");
+              return;
+            }
+            if (selectedLeadId) await loadLeadDetail(selectedLeadId);
+          });
+        });
+      }
+
+      async function loadMe() {
+        const resp = await fetch("/api/cabinet/me");
+        if (resp.status === 401) { location.href = "/cabinet/login"; return; }
+        const data = await resp.json();
+        document.getElementById("who").textContent = `${data.role}: ${data.username}`;
+      }
+
+      async function loadFunnel() {
+        const resp = await fetch("/api/cabinet/funnel");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        funnelCache = data;
+        document.getElementById("k-total").textContent = data.total;
+        document.getElementById("k-paid").textContent = data.paid;
+        document.getElementById("k-lost").textContent = data.lost;
+        document.getElementById("k-conv").textContent = `${data.conversion_paid_percent}%`;
+        const statusSelect = document.getElementById("status");
+        for (const s of statusValues) {
+          const c = data.by_status[s] || 0;
+          const opt = document.createElement("option");
+          opt.value = s;
+          opt.textContent = `${s} (${c})`;
+          statusSelect.appendChild(opt);
+        }
+        const sourceSelect = document.getElementById("source");
+        for (const [source, count] of Object.entries(data.by_source || {})) {
+          const opt = document.createElement("option");
+          opt.value = source;
+          opt.textContent = `${source} (${count})`;
+          sourceSelect.appendChild(opt);
+        }
+      }
+
+      async function loadLeads() {
+        const status = document.getElementById("status").value;
+        const source = document.getElementById("source").value;
+        const q = document.getElementById("q").value.trim();
+        const params = new URLSearchParams({limit: String(limit), offset: String(offset)});
+        if (status) params.set("status", status);
+        if (source) params.set("source", source);
+        if (q) params.set("query", q);
+        const resp = await fetch(`/api/cabinet/leads?${params.toString()}`);
+        if (resp.status === 401) { location.href = "/cabinet/login"; return; }
+        const data = await resp.json();
+        const tbody = document.getElementById("rows");
+        tbody.innerHTML = "";
+        for (const row of data.items) {
+          const tr = document.createElement("tr");
+          const summary = row.summary?.length > 180 ? row.summary.slice(0, 180) + "…" : (row.summary || "");
+          tr.innerHTML = `
+            <td class="mono">${row.id}</td>
+            <td><span class="state">${esc(row.source)}</span><div class="mono">${esc(row.external_chat_id)}</div></td>
+            <td>${esc(row.ad_title || "-")}</td>
+            <td>${esc(row.contact_raw || "-")}</td>
+            <td>${esc(summary)}</td>
+            <td>
+              <select data-lead-id="${row.id}" class="status-pick">
+                ${statusValues.map((s) => `<option value="${s}" ${s === row.status ? "selected" : ""}>${s}</option>`).join("")}
+              </select>
+            </td>
+            <td>${fmtDate(row.created_at)}</td>
+            <td><button class="btn open-lead" data-lead-id="${row.id}">Открыть</button></td>
+          `;
+          tbody.appendChild(tr);
+        }
+        document.getElementById("page-info").textContent = `Показано ${data.items.length} из ${data.total}`;
+        bindStatusPicks();
+        bindLeadOpenControls();
+        if (data.items.length && !selectedLeadId) {
+          await loadLeadDetail(data.items[0].id);
+        } else if (selectedLeadId && data.items.some((x) => String(x.id) === String(selectedLeadId))) {
+          await loadLeadDetail(selectedLeadId);
+        }
+      }
+
+      function bindStatusPicks() {
+        document.querySelectorAll(".status-pick").forEach((el) => {
+          el.addEventListener("change", async () => {
+            const leadId = el.getAttribute("data-lead-id");
+            const status = el.value;
+            const resp = await fetch(`/api/cabinet/leads/${leadId}/status`, {
+              method: "PATCH",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({status}),
+            });
+            if (!resp.ok) {
+              alert("Не удалось обновить статус");
+            } else if (funnelCache) {
+              await loadFunnelFresh();
+            }
+          });
+        });
+      }
+
+      function bindLeadOpenControls() {
+        document.querySelectorAll(".open-lead").forEach((el) => {
+          el.addEventListener("click", async () => {
+            const leadId = el.getAttribute("data-lead-id");
+            await loadLeadDetail(leadId);
+          });
+        });
+      }
+
+      async function loadFunnelFresh() {
+        document.getElementById("status").innerHTML = '<option value="">Все статусы</option>';
+        document.getElementById("source").innerHTML = '<option value="">Все источники</option>';
+        await loadFunnel();
+      }
+
+      document.getElementById("apply").addEventListener("click", async () => {
+        offset = 0;
+        await loadLeads();
+      });
+      document.getElementById("prev").addEventListener("click", async () => {
+        offset = Math.max(0, offset - limit);
+        await loadLeads();
+      });
+      document.getElementById("next").addEventListener("click", async () => {
+        offset += limit;
+        await loadLeads();
+      });
+      document.getElementById("logout").addEventListener("click", async () => {
+        await fetch("/api/cabinet/logout", {method: "POST"});
+        location.href = "/cabinet/login";
+      });
+      document.getElementById("task-add").addEventListener("click", createTaskForSelectedLead);
+
+      (async () => {
+        await loadMe();
+        await loadFunnel();
+        await loadLeads();
+      })();
+    </script>
+  </body>
+</html>
+"""
+    return HTMLResponse(content=html)
+
+
+@router.post("/api/cabinet/login", response_model=CabinetAuthResponse)
+def cabinet_login(request: Request, body: CabinetLoginRequest):
+    settings = _settings_from_app(request.app)
+    creds = _dashboard_credentials(settings)
+    if not creds:
+        raise HTTPException(
+            status_code=503,
+            detail="dashboard credentials are not configured",
+        )
+
+    auth = creds.get(body.username)
+    if auth is None:
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    role, expected_password = auth
+    if not hmac.compare_digest(expected_password, body.password):
+        raise HTTPException(status_code=401, detail="invalid username or password")
+
+    token = _create_dashboard_session_token(body.username, role, settings)
+    response = JSONResponse(content=CabinetAuthResponse(ok=True, role=role, username=body.username).model_dump())
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=max(1, int(settings.dashboard_session_ttl_hours)) * 3600,
+        httponly=True,
+        secure=_dashboard_cookie_secure(settings),
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@router.post("/api/cabinet/logout", response_model=TelegramWebhookResponse)
+def cabinet_logout():
+    response = JSONResponse(content=TelegramWebhookResponse(ok=True).model_dump())
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return response
+
+
+@router.get("/api/cabinet/me", response_model=CabinetMeResponse)
+def cabinet_me(request: Request):
+    session = _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    return CabinetMeResponse(role=session["role"], username=session["username"])
+
+
+@router.get("/api/cabinet/funnel", response_model=CabinetFunnelResponse)
+def cabinet_funnel(request: Request, db: Session = Depends(get_db)):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    repo = Repository(db)
+    raw = repo.get_leads_funnel_snapshot()
+
+    by_status = {status: int(raw["by_status"].get(status, 0)) for status in CABINET_STATUS_ORDER}
+    for status, count in raw["by_status"].items():
+        if status not in by_status:
+            by_status[status] = int(count)
+
+    return CabinetFunnelResponse(
+        total=int(raw["total"]),
+        paid=int(raw["paid"]),
+        lost=int(raw["lost"]),
+        conversion_paid_percent=float(raw["conversion_paid_percent"]),
+        by_status=by_status,
+        by_source={k: int(v) for k, v in raw["by_source"].items()},
+    )
+
+
+@router.get("/api/cabinet/leads", response_model=CabinetLeadsResponse)
+def cabinet_leads(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    query: str | None = Query(default=None),
+):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    status_normalized = status.strip().upper() if status else None
+    if status_normalized and status_normalized not in CABINET_ALLOWED_STATUSES:
+        raise HTTPException(status_code=400, detail="unsupported status filter")
+
+    repo = Repository(db)
+    rows = repo.list_leads_with_context(
+        limit=limit,
+        offset=offset,
+        status=status_normalized,
+        source=source,
+        query=query,
+    )
+    total = repo.count_leads_with_context(
+        status=status_normalized,
+        source=source,
+        query=query,
+    )
+    return CabinetLeadsResponse(
+        total=total,
+        limit=limit,
+        offset=offset,
+        items=[_lead_row_to_cabinet_item(repo, lead, chat, ad) for lead, chat, ad in rows],
+    )
+
+
+@router.get("/api/cabinet/leads/{lead_id}", response_model=CabinetLeadDetailResponse)
+def cabinet_lead_detail(
+    lead_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    message_limit: int = Query(default=120, ge=20, le=500),
+):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    repo = Repository(db)
+    data = repo.get_lead_detail(lead_id=lead_id, message_limit=message_limit)
+    if data is None:
+        raise HTTPException(status_code=404, detail="lead_not_found")
+    lead = data["lead"]
+    chat = data["chat"]
+    ad = data["ad"]
+    return CabinetLeadDetailResponse(
+        lead=_lead_row_to_cabinet_item(repo, lead, chat, ad),
+        chat_state=chat.state,
+        domain=chat.domain,
+        ad_category=ad.category,
+        ad_raw_category=ad.raw_category,
+        customer_name=chat.customer_name,
+        messages=[
+            CabinetLeadMessageItem(
+                id=item.id,
+                direction=item.direction,
+                text=item.text,
+                created_at=item.created_at,
+            )
+            for item in data["messages"]
+        ],
+        tasks=[_lead_task_to_item(task) for task in data["tasks"]],
+    )
+
+
+@router.post("/api/cabinet/leads/{lead_id}/tasks", response_model=CabinetLeadTaskItem)
+def cabinet_create_lead_task(
+    lead_id: int,
+    body: CabinetTaskCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    repo = Repository(db)
+    row = repo.get_lead_with_context(lead_id=lead_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="lead_not_found")
+    task = repo.create_lead_task(
+        lead_id=lead_id,
+        title=body.title,
+        due_at=body.due_at,
+    )
+    db.commit()
+    return _lead_task_to_item(task)
+
+
+@router.patch("/api/cabinet/leads/{lead_id}/status", response_model=CabinetLeadListItem)
+def cabinet_update_lead_status(
+    lead_id: int,
+    body: CabinetLeadStatusUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    status = body.status.strip().upper()
+    if status not in CABINET_ALLOWED_STATUSES:
+        raise HTTPException(status_code=400, detail="unsupported status")
+
+    repo = Repository(db)
+    lead = repo.update_lead_status(lead_id=lead_id, status=status)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="lead_not_found")
+    row = repo.get_lead_with_context(lead_id=lead_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="lead_context_not_found")
+    db.commit()
+    lead_item, chat, ad = row
+    return _lead_row_to_cabinet_item(repo, lead_item, chat, ad)
+
+
+@router.patch("/api/cabinet/tasks/{task_id}", response_model=CabinetLeadTaskItem)
+def cabinet_update_task(
+    task_id: int,
+    body: CabinetTaskUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    if body.title is None and body.status is None and body.due_at is None and not body.clear_due_at:
+        raise HTTPException(status_code=400, detail="empty_update")
+    status = None
+    if body.status is not None:
+        status = body.status.strip().upper()
+        if status not in CABINET_ALLOWED_TASK_STATUSES:
+            raise HTTPException(status_code=400, detail="unsupported task status")
+    repo = Repository(db)
+    task = repo.update_lead_task(
+        task_id=task_id,
+        title=body.title,
+        status=status,
+        due_at=body.due_at if not body.clear_due_at else None,
+        apply_due_at=body.clear_due_at or body.due_at is not None,
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="task_not_found")
+    db.commit()
+    return _lead_task_to_item(task)
 
 
 @router.get("/api/learning/status", response_model=LearningStatusResponse)
@@ -289,6 +1251,143 @@ def telegram_webhook(
                 repo.create_feedback_event(chat_id=chat.id if chat else None, tag=tag, comment=comment)
                 db.commit()
 
+    return TelegramWebhookResponse(ok=True)
+
+
+@router.post("/webhooks/youla", response_model=TelegramWebhookResponse)
+def youla_webhook(
+    request: Request,
+    payload: dict,
+    db: Session = Depends(get_db),
+    ce_type: str | None = Header(default=None, alias="Ce-Type"),
+    ce_id: str | None = Header(default=None, alias="Ce-Id"),
+    ce_time: str | None = Header(default=None, alias="Ce-Time"),
+    x_youla_webhook_secret: str | None = Header(default=None, alias="X-Youla-Webhook-Secret"),
+):
+    settings = _settings_from_app(request.app)
+    if not settings.youla_enabled:
+        logger.info("youla_webhook ignored: disabled")
+        return TelegramWebhookResponse(ok=True)
+
+    if settings.youla_webhook_secret and x_youla_webhook_secret != settings.youla_webhook_secret:
+        logger.warning("youla_webhook rejected: invalid secret")
+        raise HTTPException(status_code=403, detail="invalid_youla_webhook_secret")
+
+    message_text = _pick_str(
+        payload,
+        "message",
+        "text",
+        "body",
+        "message.text",
+        "data.message",
+        "data.text",
+        "payload.message",
+        "payload.text",
+    )
+    chat_id = _pick_str(payload, "chat_id", "chatId", "conversation_id", "conversationId", "data.chat_id")
+    message_id = _pick_str(payload, "id", "message_id", "messageId", "data.id", "data.message_id")
+    sender_id = _pick_str(payload, "sender_id", "senderId", "sender.id", "from.id", "author_id", "data.sender_id")
+    recipient_id = _pick_str(
+        payload,
+        "recipient_id",
+        "recipientId",
+        "recipient.id",
+        "to.id",
+        "owner_id",
+        "data.recipient_id",
+    )
+    product_id = _pick_str(payload, "product_id", "productId", "product.id", "item_id", "ad_id", "data.product_id")
+    product_title = _pick_str(
+        payload,
+        "product_title",
+        "product.title",
+        "product.name",
+        "item.title",
+        "item.name",
+        "ad.title",
+        "ad.name",
+        "data.product_title",
+        "data.product.title",
+        "data.product.name",
+    )
+    product_url = _pick_str(
+        payload,
+        "product_url",
+        "product.url",
+        "item.url",
+        "ad.url",
+        "data.product_url",
+        "data.product.url",
+    )
+    has_payload_signature = bool(message_text and chat_id and message_id and sender_id and recipient_id and product_id)
+
+    ce_type_normalized = (ce_type or "").strip().lower()
+    if ce_type_normalized not in {"message.incom", "message.incoming", "message.income"} and not has_payload_signature:
+        logger.info("youla_webhook ignored: unsupported ce_type=%s and no payload signature", ce_type)
+        return TelegramWebhookResponse(ok=True)
+    if ce_type_normalized not in {"message.incom", "message.incoming", "message.income"} and has_payload_signature:
+        logger.warning("youla_webhook accepted by payload signature: ce_type=%s", ce_type)
+
+    if not has_payload_signature:
+        logger.info(
+            "youla_webhook ignored: missing fields chat_id=%s message_id=%s sender_id=%s recipient_id=%s product_id=%s has_text=%s",
+            bool(chat_id),
+            bool(message_id),
+            bool(sender_id),
+            bool(recipient_id),
+            bool(product_id),
+            bool(message_text),
+        )
+        return TelegramWebhookResponse(ok=True)
+
+    external_chat_id = f"youla:{chat_id}"
+    external_message_id = f"youla:{message_id}"
+    event_id = f"youla:{ce_id}" if ce_id else f"youla:{chat_id}:{message_id}"
+    ad_category = "Недвижимость" if settings.youla_force_real_estate else None
+    incoming = IncomingEvent(
+        event_id=event_id,
+        chat_id=external_chat_id,
+        message_id=external_message_id,
+        sender_type="user",
+        text=message_text,
+        created_at=_parse_ce_time(ce_time),
+        ad_context=AdContext(
+            ad_id=f"youla:{product_id}",
+            title=product_title or f"Youla product {product_id}",
+            category=ad_category,
+            url=product_url or None,
+        ),
+        customer_name=None,
+        marketplace="youla",
+        sender_id=sender_id,
+        recipient_id=recipient_id,
+        product_id=product_id,
+    )
+    logger.info(
+        "youla_webhook accepted: event_id=%s chat_id=%s message_id=%s product_id=%s",
+        event_id,
+        external_chat_id,
+        external_message_id,
+        product_id,
+    )
+    try:
+        request.app.state.container.processor.process_incoming_event(db=db, event=incoming, allow_reply=True)
+    except Exception as exc:  # noqa: BLE001
+        # Webhook ingress must stay 200 for provider delivery stability.
+        # Processing details are already persisted in events_log by MessageProcessor.
+        logger.exception(
+            "youla_webhook processing failed: event_id=%s chat_id=%s message_id=%s error=%s",
+            event_id,
+            external_chat_id,
+            external_message_id,
+            exc,
+        )
+    return TelegramWebhookResponse(ok=True)
+
+
+@router.get("/webhooks/youla", response_model=TelegramWebhookResponse)
+def youla_webhook_health():
+    # Some providers validate webhook URLs with GET before sending POST events.
     return TelegramWebhookResponse(ok=True)
 
 

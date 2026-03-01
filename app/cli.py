@@ -36,6 +36,32 @@ def cmd_validate_env() -> int:
     return 0
 
 
+def cmd_validate_youla_readiness() -> int:
+    settings = get_settings()
+
+    if not settings.youla_enabled:
+        print("YOULA is disabled (YOULA_ENABLED=false).")
+        print("Set YOULA_ENABLED=true when Youla access is ready.")
+        return 0
+
+    required = {
+        "YOULA_MODE": settings.youla_mode,
+        "YOULA_API_BASE": settings.youla_api_base,
+        "YOULA_API_TOKEN": settings.youla_api_token,
+    }
+
+    missing = [k for k, v in required.items() if not v]
+    if missing:
+        print("Youla readiness is NOT complete. Missing required env vars:")
+        for key in missing:
+            print(f"- {key}")
+        return 2
+
+    print("Youla readiness env looks good.")
+    print(f"Mode: {settings.youla_mode}")
+    return 0
+
+
 def cmd_poll_once() -> int:
     base_settings = get_settings()
     settings = base_settings.model_copy(update={"polling_enabled": False})
@@ -258,10 +284,9 @@ def cmd_stats_report_once() -> int:
                     "report_date": result.report_date,
                     "sent": result.sent,
                     "target_chat_id": result.target_chat_id,
-                    "items_total": result.items_total,
-                    "top_reach_count": result.top_reach_count,
-                    "top_conversion_count": result.top_conversion_count,
-                    "low_conversion_count": result.low_conversion_count,
+                    "anomaly_count": result.anomaly_count,
+                    "unanswered_count": result.unanswered_count,
+                    "new_contacts_count": result.new_contacts_count,
                 },
                 ensure_ascii=False,
             )
@@ -276,6 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("validate-env", help="Validate required environment variables")
+    sub.add_parser("validate-youla-readiness", help="Validate Youla integration environment readiness")
     sub.add_parser("poll-once", help="Run one Avito polling cycle")
     sub.add_parser("learn-once", help="Run one self-learning cycle")
     sub.add_parser("learning-status", help="Print self-learning status")
@@ -292,6 +318,8 @@ def main() -> int:
 
     if args.command == "validate-env":
         return cmd_validate_env()
+    if args.command == "validate-youla-readiness":
+        return cmd_validate_youla_readiness()
     if args.command == "poll-once":
         return cmd_poll_once()
     if args.command == "learn-once":
