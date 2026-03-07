@@ -122,6 +122,8 @@ def test_cabinet_login_and_me():
     assert cabinet.status_code == 200
     html = cabinet.text
     assert 'class="stage-funnel"' in html
+    assert 'id="k-total"' not in html
+    assert "Всего лидов" not in html
     assert 'const statusValues = ["NEW","IN_PROGRESS","PAYMENT_PENDING","PAID","CALL_NEEDED","LOST"]' in html
     assert 'NEW: "Новый лид"' in html
     assert 'PAYMENT_PENDING: "Договорился о встрече"' in html

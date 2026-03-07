@@ -47,9 +47,11 @@ class DummyTelegram:
     def __init__(self):
         self.leads_sent = 0
         self.messages_sent: list[tuple[str, str]] = []
+        self.lead_cards: list[dict] = []
 
     def send_lead_card(self, **kwargs):
         self.leads_sent += 1
+        self.lead_cards.append(kwargs)
 
     def send_message(self, chat_id: str, text: str):
         self.messages_sent.append((chat_id, text))
@@ -139,7 +141,7 @@ def test_processor_ignores_auto_category(db_session):
 
 
 def test_processor_creates_lead_on_contact(db_session):
-    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001")
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001", telegram_manager_chat_id="111222")
     processor, avito, telegram, openai = build_processor(settings)
 
     event = IncomingEvent(
@@ -157,12 +159,94 @@ def test_processor_creates_lead_on_contact(db_session):
     assert outcome == "lead"
     assert len(avito.sent_messages) == 1
     assert telegram.leads_sent == 1
+    assert telegram.lead_cards[0]["leads_chat_id"] == "111222"
+    assert telegram.lead_cards[0]["actions"][0][0]["callback_data"] == "crm:lead:1:contacted"
+    assert telegram.lead_cards[0]["actions"][2][0]["callback_data"] == "crm:lead:1:irrelevant"
+    assert "external_chat_id" not in telegram.lead_cards[0]
     assert openai.reply_calls == 1
     assert "Заголовок объявления: Койко-место" in openai.last_system_prompt
 
     leads = db_session.query(Lead).all()
     assert len(leads) == 1
     assert leads[0].contact_normalized == "+79992182468"
+
+
+def test_processor_creates_lead_from_ten_digit_phone(db_session):
+    settings = Settings(polling_enabled=False, telegram_leads_chat_id="-1001", telegram_manager_chat_id="111222")
+    processor, avito, telegram, _ = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-2b",
+        chat_id="chat-real-10",
+        message_id="msg-2b",
+        sender_type="user",
+        text="Здравствуйте, нужен хостел на неделю. Мой номер 9008264561",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-real-10", title="Койко-место", category="Недвижимость"),
+        customer_name="Иван",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "lead"
+    assert len(avito.sent_messages) == 1
+    assert telegram.leads_sent == 1
+    leads = db_session.query(Lead).all()
+    assert len(leads) == 1
+    assert leads[0].contact_normalized == "+79008264561"
+
+
+def test_processor_sends_phone_anomaly_to_manager_without_creating_lead(db_session):
+    settings = Settings(polling_enabled=False, telegram_manager_chat_id="111222")
+    processor, avito, telegram, _ = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-phone-anomaly",
+        chat_id="chat-phone-anomaly",
+        message_id="msg-phone-anomaly",
+        sender_type="user",
+        text="Мой номер 902123, напишите мне",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-phone-anomaly", title="Комната 18 м2", category="Недвижимость"),
+        customer_name="Иван",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert len(avito.sent_messages) == 1
+    assert telegram.leads_sent == 0
+    assert len(telegram.messages_sent) == 1
+    chat_id, text = telegram.messages_sent[0]
+    assert chat_id == "111222"
+    assert "ANOMALY: номер телефона требует проверки" in text
+    assert "Контакт из сообщения: 902123" in text
+    assert db_session.query(Lead).count() == 0
+
+
+def test_processor_sends_long_phone_to_manager_review_without_creating_lead(db_session):
+    settings = Settings(polling_enabled=False, telegram_manager_chat_id="111222")
+    processor, avito, telegram, _ = build_processor(settings)
+
+    event = IncomingEvent(
+        event_id="evt-phone-review",
+        chat_id="chat-phone-review",
+        message_id="msg-phone-review",
+        sender_type="user",
+        text="Мой номер 799210140203, напишите мне",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-phone-review", title="Комната 18 м2", category="Недвижимость"),
+        customer_name="Иван",
+    )
+
+    outcome = processor._process_event(db_session, event)
+    assert outcome == "replied"
+    assert len(avito.sent_messages) == 1
+    assert telegram.leads_sent == 0
+    assert len(telegram.messages_sent) == 1
+    chat_id, text = telegram.messages_sent[0]
+    assert chat_id == "111222"
+    assert "Проверить номер телефона" in text
+    assert "Контакт из сообщения: 799210140203" in text
+    assert db_session.query(Lead).count() == 0
 
 
 def test_processor_syncs_avito_dialog_to_crm_ingest_without_duplicates(db_session):
@@ -200,7 +284,7 @@ def test_processor_notifies_manager_on_new_crm_dialog_once(db_session):
         polling_enabled=False,
         crm_ingest_enabled=True,
         crm_ingest_notify_telegram_enabled=True,
-        crm_ingest_notify_chat_id="-2001",
+        telegram_manager_chat_id="-3001",
     )
     crm_ingest = DummyCrmIngest()
     processor, _, telegram, _ = build_processor(settings, crm_ingest_client=crm_ingest)
@@ -234,8 +318,9 @@ def test_processor_notifies_manager_on_new_crm_dialog_once(db_session):
     # created=True only for first ingest create, so telegram notify should be single-shot
     assert len(telegram.messages_sent) == 1
     chat_id, text = telegram.messages_sent[0]
-    assert chat_id == "-2001"
+    assert chat_id == "-3001"
     assert "Новый CRM-диалог" in text
+    assert "чат ID:" not in text
 
 
 def test_processor_notifies_manager_on_new_youla_crm_dialog_with_chat_link(db_session):
@@ -243,7 +328,7 @@ def test_processor_notifies_manager_on_new_youla_crm_dialog_with_chat_link(db_se
         polling_enabled=False,
         crm_ingest_enabled=True,
         crm_ingest_notify_telegram_enabled=True,
-        crm_ingest_notify_chat_id="-2001",
+        telegram_manager_chat_id="-3001",
     )
     crm_ingest = DummyCrmIngest()
     youla = DummyYoula()
@@ -271,12 +356,45 @@ def test_processor_notifies_manager_on_new_youla_crm_dialog_with_chat_link(db_se
     processor._process_event(db_session, event)
 
     assert len(telegram.messages_sent) == 1
-    _, text = telegram.messages_sent[0]
+    chat_id, text = telegram.messages_sent[0]
+    assert chat_id == "-3001"
     assert "Новый CRM-диалог" in text
     assert "Чат" in text
     assert "https://youla.ru/web-chat/chat-123" in text
     assert "Объявление" in text
     assert "https://youla.ru/some-ad" in text
+    assert "чат ID:" not in text
+
+
+def test_processor_suppresses_crm_notify_when_it_targets_leads_chat(db_session):
+    settings = Settings(
+        polling_enabled=False,
+        crm_ingest_enabled=True,
+        crm_ingest_notify_telegram_enabled=True,
+        telegram_leads_chat_id="-3001",
+    )
+    crm_ingest = DummyCrmIngest()
+    processor, _, telegram, _ = build_processor(settings, crm_ingest_client=crm_ingest)
+
+    event = IncomingEvent(
+        event_id="evt-crm-same-chat-1",
+        chat_id="chat-crm-same-chat",
+        message_id="msg-crm-same-chat-1",
+        sender_type="user",
+        text="Здравствуйте, нужен хостел. Мой номер +7 999 218-24-68",
+        created_at=datetime.now(timezone.utc),
+        ad_context=AdContext(ad_id="ad-crm-same-chat", title="Комната 18м2", category="Недвижимость"),
+        customer_name="Кирилл",
+        marketplace="avito",
+    )
+
+    outcome = processor._process_event(db_session, event)
+
+    assert outcome == "lead"
+    assert telegram.leads_sent == 1
+    assert telegram.messages_sent == []
+    assert telegram.lead_cards[0]["contact_raw"] == "+7 999 218-24-68"
+    assert telegram.lead_cards[0]["summary"] == "Клиент заинтересован, передать менеджеру."
 
 
 def test_processor_enriches_youla_product_title_and_absolute_url_for_crm(db_session):

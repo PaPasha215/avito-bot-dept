@@ -438,6 +438,7 @@ class MessageProcessor:
                     logger.exception("Failed to store self-learning usage for chat %s: %s", event.chat_id, exc)
 
             contact = self._extract_contact(history_messages)
+            contact_review = self._extract_contact_review(event.text)
             lead_created = False
             lead = None
             summary = ""
@@ -495,6 +496,21 @@ class MessageProcessor:
                 except Exception as exc:  # noqa: BLE001
                     # Lead pipeline must not fail whole event after reply was sent to Avito.
                     logger.exception("Lead pipeline failed for chat %s: %s", event.chat_id, exc)
+            elif contact_review is not None:
+                try:
+                    self._notify_manager_about_contact_review(
+                        marketplace=source,
+                        ad_title=ad.title,
+                        ad_url=ad.url,
+                        chat_external_id=chat.external_chat_id,
+                        customer_name=chat.customer_name,
+                        message_text=event.text,
+                        contact_raw=contact_review.raw,
+                        is_anomaly=bool(contact_review.is_anomaly),
+                        reason=str(contact_review.reason or ""),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Contact review alert failed for chat %s: %s", event.chat_id, exc)
 
             crm_result = self._sync_crm_message(
                 source=source,
@@ -545,24 +561,25 @@ class MessageProcessor:
         summary: str,
         context_lines: list[str],
     ) -> None:
-        if not self.settings.telegram_leads_chat_id:
-            logger.warning("Lead created but TELEGRAM_LEADS_CHAT_ID is empty")
+        target_chat_id = self._resolve_manager_telegram_chat_id()
+        if not target_chat_id:
+            logger.warning("Lead created but target telegram chat is empty")
             return
 
         with_retry(
             lambda: self.telegram_client.send_lead_card(
-                leads_chat_id=self.settings.telegram_leads_chat_id,
+                leads_chat_id=target_chat_id,
                 lead_id=lead_id,
                 ad_title=ad_title,
                 ad_url=ad_url,
                 marketplace=marketplace,
                 chat_url=self._build_marketplace_chat_url(marketplace=marketplace, external_chat_id=chat_external_id),
-                external_chat_id=chat_external_id,
                 customer_name=customer_name,
                 contact_raw=contact_raw,
                 summary=summary,
                 context_lines=context_lines,
                 status=LeadStatus.NEW,
+                actions=self._telegram_lead_actions(lead_id),
             ),
             name="telegram_send_lead",
             attempts=3,
@@ -646,8 +663,13 @@ class MessageProcessor:
         if crm_result is None or not bool(getattr(crm_result, "created", False)):
             return
 
-        target_chat_id = self.settings.crm_ingest_notify_chat_id or self.settings.telegram_leads_chat_id
+        target_chat_id = self.settings.crm_ingest_notify_chat_id or self._resolve_manager_telegram_chat_id()
         if not target_chat_id:
+            return
+        if self.settings.telegram_leads_chat_id and target_chat_id == self.settings.telegram_leads_chat_id:
+            # Lead cards already go to this chat and contain the useful manager payload
+            # (contact, summary, recent context). Do not pollute the same chat with a
+            # thinner CRM "dialog created" notification.
             return
 
         ad_title = ad.title if ad and getattr(ad, "title", None) else event.ad_context.title
@@ -660,7 +682,6 @@ class MessageProcessor:
             "",
             ad_title,
         ]
-        lines.append(f"чат ID: {event.chat_id}")
         if chat_url:
             lines.extend(["Чат", chat_url])
         if ad_url:
@@ -672,6 +693,63 @@ class MessageProcessor:
         except Exception as exc:  # noqa: BLE001
             logger.warning("CRM new-dialog telegram notify failed chat=%s source=%s: %s", target_chat_id, source, exc)
 
+    def _resolve_manager_telegram_chat_id(self) -> str | None:
+        return self.settings.telegram_manager_chat_id or self.settings.telegram_leads_chat_id
+
+    def _notify_manager_about_contact_review(
+        self,
+        *,
+        marketplace: str,
+        ad_title: str,
+        ad_url: str | None,
+        chat_external_id: str,
+        customer_name: str | None,
+        message_text: str,
+        contact_raw: str,
+        is_anomaly: bool,
+        reason: str,
+    ) -> None:
+        target_chat_id = self._resolve_manager_telegram_chat_id()
+        if not target_chat_id:
+            return
+
+        reason_text = "номер короче 10 цифр" if is_anomaly else "номер длиннее ожидаемого формата"
+        title = "ANOMALY: номер телефона требует проверки" if is_anomaly else "Проверить номер телефона"
+        lines = [
+            title,
+            "",
+            f"Источник: {self._marketplace_label(marketplace)}",
+            f"Объявление: {ad_title}",
+        ]
+        if customer_name:
+            lines.append(f"Имя: {customer_name}")
+        lines.append(f"Контакт из сообщения: {contact_raw}")
+        lines.append(f"Причина: {reason_text}")
+        chat_url = self._build_marketplace_chat_url(marketplace=marketplace, external_chat_id=chat_external_id)
+        if chat_url:
+            lines.extend(["Чат", chat_url])
+        if ad_url:
+            lines.extend(["Объявление", ad_url])
+        lines.extend(["", "Сообщение клиента:", message_text[:500]])
+        self.telegram_client.send_message(chat_id=target_chat_id, text="\n".join(lines))
+
+    @staticmethod
+    def _telegram_lead_actions(lead_id: int) -> list[list[dict[str, str]]]:
+        lead = int(lead_id)
+        return [
+            [
+                {"text": "Взял в работу (Связался)", "callback_data": f"crm:lead:{lead}:contacted"},
+                {"text": "Не может говорить/занят (Перезвонить)", "callback_data": f"crm:lead:{lead}:callback"},
+            ],
+            [
+                {"text": "Договорился о встрече (Заселяется)", "callback_data": f"crm:lead:{lead}:settling"},
+                {"text": "Заселил (Сделка состоялась)", "callback_data": f"crm:lead:{lead}:settled"},
+            ],
+            [
+                {"text": "Неактуально", "callback_data": f"crm:lead:{lead}:irrelevant"},
+            ],
+        ]
+
     def _extract_contact(self, messages: list) -> tuple[str, str] | None:
         for message in reversed(messages):
             if message.direction != MessageDirection.INBOUND.value:
@@ -680,6 +758,12 @@ class MessageProcessor:
             if found:
                 return found
         return None
+
+    def _extract_contact_review(self, text: str):
+        details = self.lead_detector.extract_contact_details(text)
+        if details is None or details.is_valid or not details.needs_manager_review:
+            return None
+        return details
 
     @staticmethod
     def _trim_sentences(text: str, max_sentences: int = 4) -> str:
