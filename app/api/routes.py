@@ -4,15 +4,19 @@ import base64
 import hmac
 import json
 import logging
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.db import SessionLocal
+from app.models import Chat, EventLog, Lead
 from app.repositories import Repository
 from app.schemas import (
     CabinetAuthResponse,
@@ -48,17 +52,29 @@ from app.types import AdContext, IncomingEvent
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+OWNER_MENU_TEXT = "Меню"
+OWNER_LEADS_TODAY_TEXT = "Лиды сегодня"
+OWNER_SOURCES_TEXT = "Статус источников"
 SESSION_COOKIE_NAME = "rk_cab_session"
+CABINET_CSRF_COOKIE_NAME = "rk_cab_csrf"
+CABINET_CSRF_HEADER_NAME = "x-csrf-token"
 CABINET_STATUS_ORDER = [
     "NEW",
-    "CONTACT_RECEIVED",
-    "CALL_NEEDED",
+    "IN_PROGRESS",
     "PAYMENT_PENDING",
+    "CALL_NEEDED",
     "PAID",
-    "CHECKED_IN",
     "LOST",
 ]
-CABINET_ALLOWED_STATUSES = set(CABINET_STATUS_ORDER + ["IN_PROGRESS", "WON", "SPAM"])
+CABINET_ALLOWED_STATUSES = set(
+    CABINET_STATUS_ORDER
+    + [
+        "CONTACT_RECEIVED",
+        "CHECKED_IN",
+        "WON",
+        "SPAM",
+    ]
+)
 CABINET_TASK_STATUS_ORDER = ["OPEN", "DONE", "CANCELLED"]
 CABINET_ALLOWED_TASK_STATUSES = set(CABINET_TASK_STATUS_ORDER)
 
@@ -73,6 +89,202 @@ def get_db():
 
 def _settings_from_app(app: FastAPI) -> Settings:
     return app.state.container.settings
+
+
+def _owner_reply_markup() -> dict:
+    return {
+        "keyboard": [
+            [{"text": OWNER_LEADS_TODAY_TEXT}, {"text": OWNER_SOURCES_TEXT}],
+            [{"text": OWNER_MENU_TEXT}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+def _owner_menu_message() -> str:
+    return (
+        "Быстрый контроль бота.\n"
+        f"Кнопки: «{OWNER_LEADS_TODAY_TEXT}» и «{OWNER_SOURCES_TEXT}».\n"
+        "Покажу лиды за сегодня и состояние Avito/Youla по последним событиям."
+    )
+
+
+def _bot_timezone(settings: Settings) -> ZoneInfo:
+    try:
+        return ZoneInfo(settings.bot_health_daily_report_timezone)
+    except Exception:  # noqa: BLE001
+        return ZoneInfo("Asia/Yekaterinburg")
+
+
+def _format_local_dt(dt: datetime | None, tz: ZoneInfo) -> str:
+    if dt is None:
+        return "нет"
+    local_dt = dt.astimezone(tz)
+    return local_dt.strftime("%d.%m %H:%M")
+
+
+def _format_age(dt: datetime | None, now: datetime) -> str:
+    if dt is None:
+        return "нет"
+    delta = now - dt.astimezone(timezone.utc)
+    total_minutes = max(0, int(delta.total_seconds() // 60))
+    if total_minutes < 60:
+        return f"{total_minutes}м назад"
+    hours, minutes = divmod(total_minutes, 60)
+    if hours < 24:
+        return f"{hours}ч {minutes}м назад"
+    days, rem_hours = divmod(hours, 24)
+    return f"{days}д {rem_hours}ч назад"
+
+
+def _lead_source(external_chat_id: str | None) -> str:
+    value = str(external_chat_id or "").strip().lower()
+    if value.startswith("youla:"):
+        return "youla"
+    return "avito"
+
+
+def _owner_leads_today_text(db: Session, settings: Settings) -> str:
+    now_utc = datetime.now(timezone.utc)
+    tz = _bot_timezone(settings)
+    now_local = now_utc.astimezone(tz)
+    day_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = day_start_local.astimezone(timezone.utc)
+    hour_start_utc = now_utc - timedelta(hours=1)
+
+    rows = db.execute(
+        select(Chat.external_chat_id, Lead.created_at)
+        .join(Lead, Lead.chat_id == Chat.id)
+        .where(and_(Lead.created_at >= day_start_utc, Lead.created_at <= now_utc))
+        .order_by(Lead.created_at.desc())
+    ).all()
+
+    hour_rows = db.execute(
+        select(Chat.external_chat_id)
+        .join(Lead, Lead.chat_id == Chat.id)
+        .where(and_(Lead.created_at >= hour_start_utc, Lead.created_at <= now_utc))
+    ).all()
+
+    by_source = {"avito": 0, "youla": 0}
+    latest_at: datetime | None = None
+    latest_source = ""
+    for external_chat_id, created_at in rows:
+        source = _lead_source(external_chat_id)
+        by_source[source] = by_source.get(source, 0) + 1
+        if latest_at is None:
+            latest_at = created_at
+            latest_source = source
+
+    by_source_hour = {"avito": 0, "youla": 0}
+    for (external_chat_id,) in hour_rows:
+        source = _lead_source(external_chat_id)
+        by_source_hour[source] = by_source_hour.get(source, 0) + 1
+
+    total_today = len(rows)
+    last_line = "нет"
+    if latest_at is not None:
+        label = "Юла" if latest_source == "youla" else "Авито"
+        last_line = f"{_format_local_dt(latest_at, tz)} ({label})"
+
+    return (
+        "Лиды сегодня\n"
+        f"Всего: {total_today}\n"
+        f"Avito: {by_source['avito']}\n"
+        f"Youla: {by_source['youla']}\n"
+        "\n"
+        "За последний час\n"
+        f"Avito: {by_source_hour['avito']}\n"
+        f"Youla: {by_source_hour['youla']}\n"
+        "\n"
+        f"Последний лид: {last_line}"
+    )
+
+
+def _owner_sources_status_text(db: Session, settings: Settings) -> str:
+    now_utc = datetime.now(timezone.utc)
+    tz = _bot_timezone(settings)
+    since_30m = now_utc - timedelta(minutes=30)
+    since_24h = now_utc - timedelta(hours=24)
+
+    event_counts: dict[str, int] = {}
+    event_last: dict[str, datetime | None] = {}
+    lead_counts: dict[str, int] = {"avito": 0, "youla": 0}
+
+    for source in ("avito", "youla"):
+        event_counts[source] = int(
+            db.scalar(
+                select(func.count(EventLog.id)).where(
+                    and_(EventLog.source == source, EventLog.created_at >= since_30m)
+                )
+            )
+            or 0
+        )
+        event_last[source] = db.scalar(select(func.max(EventLog.created_at)).where(EventLog.source == source))
+
+    lead_rows = db.execute(
+        select(Chat.external_chat_id)
+        .join(Lead, Lead.chat_id == Chat.id)
+        .where(and_(Lead.created_at >= since_24h, Lead.created_at <= now_utc))
+    ).all()
+    for (external_chat_id,) in lead_rows:
+        lead_counts[_lead_source(external_chat_id)] += 1
+
+    return (
+        "Статус источников\n"
+        f"Polling: {'ON' if settings.polling_enabled else 'OFF'}\n"
+        "\n"
+        "События за 30 минут\n"
+        f"Avito: {event_counts['avito']}\n"
+        f"Youla: {event_counts['youla']}\n"
+        "\n"
+        "Лиды за 24 часа\n"
+        f"Avito: {lead_counts['avito']}\n"
+        f"Youla: {lead_counts['youla']}\n"
+        "\n"
+        "Последнее событие\n"
+        f"Avito: {_format_local_dt(event_last['avito'], tz)} ({_format_age(event_last['avito'], now_utc)})\n"
+        f"Youla: {_format_local_dt(event_last['youla'], tz)} ({_format_age(event_last['youla'], now_utc)})"
+    )
+
+
+def _telegram_display_name(user: dict | None) -> str:
+    payload = user if isinstance(user, dict) else {}
+    username = str(payload.get("username") or "").strip()
+    if username:
+        return f"@{username}"
+    first_name = str(payload.get("first_name") or "").strip()
+    last_name = str(payload.get("last_name") or "").strip()
+    full_name = " ".join(part for part in [first_name, last_name] if part).strip()
+    if full_name:
+        return full_name
+    user_id = str(payload.get("id") or "").strip()
+    return f"tg:{user_id}" if user_id else "Менеджер"
+
+
+def _telegram_crm_footer(*, status_label: str, manager_name: str) -> str:
+    manager = manager_name or "Не назначен"
+    return f"CRM: {status_label}\nМенеджер: {manager}"
+
+
+def _telegram_attach_crm_footer(message_text: str, *, status_label: str, manager_name: str) -> str:
+    base = str(message_text or "").strip()
+    marker = "\n\nCRM: "
+    if marker in base:
+        base = base.split(marker, 1)[0].rstrip()
+    return f"{base}\n\n{_telegram_crm_footer(status_label=status_label, manager_name=manager_name)}"
+
+
+def _lead_status_from_telegram_action(action: str) -> str | None:
+    normalized = (action or "").strip().lower()
+    mapping = {
+        "contacted": "IN_PROGRESS",      # Взял в работу
+        "settling": "PAYMENT_PENDING",   # Договорился о встрече (заселяется)
+        "callback": "CALL_NEEDED",       # Не может говорить / занят
+        "settled": "PAID",               # Заселил (сделка состоялась)
+        "irrelevant": "LOST",            # Неактуально
+    }
+    return mapping.get(normalized)
 
 
 def _parse_ce_time(value: str | None) -> datetime:
@@ -108,6 +320,53 @@ def _pick_str(payload: dict, *paths: str) -> str:
     return ""
 
 
+def _iter_payload_tokens(value, path: str = ""):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            next_path = f"{path}.{key}" if path else str(key)
+            yield from _iter_payload_tokens(nested, next_path)
+        return
+    if isinstance(value, list):
+        for idx, nested in enumerate(value):
+            next_path = f"{path}[{idx}]"
+            yield from _iter_payload_tokens(nested, next_path)
+        return
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            yield path.lower(), text.lower()
+        return
+    if isinstance(value, (int, float, bool)) and path:
+        yield path.lower(), str(value).lower()
+
+
+def _infer_youla_system_text(payload: dict) -> str:
+    favorite_markers = ("favorite", "favourite", "bookmark", "избран")
+    matched_favorite = False
+    matched_call = False
+
+    for path, text in _iter_payload_tokens(payload):
+        combined = f"{path} {text}".strip()
+        if any(marker in combined for marker in favorite_markers):
+            matched_favorite = True
+        if "missed_call" in combined or "missed-call" in combined or "incoming_call" in combined:
+            matched_call = True
+        if "пропущенн" in combined and "звон" in combined:
+            matched_call = True
+        if "missed call" in combined or "incoming call" in combined:
+            matched_call = True
+        if any(marker in path for marker in ("missed_call", "call_event", "phone_call")):
+            matched_call = True
+        if any(marker in combined for marker in ("телефон", "перезвон", "звонок")) and "system" in path:
+            matched_call = True
+
+    if matched_call:
+        return "Пропущенный звонок"
+    if matched_favorite:
+        return "Покупатель добавил объявление в избранное."
+    return ""
+
+
 def _dashboard_credentials(settings: Settings) -> dict[str, tuple[str, str]]:
     creds: dict[str, tuple[str, str]] = {}
     if settings.dashboard_owner_username and settings.dashboard_owner_password:
@@ -124,7 +383,23 @@ def _dashboard_security_error(settings: Settings) -> str | None:
 
 
 def _dashboard_cookie_secure(settings: Settings) -> bool:
-    return settings.environment.strip().lower() in {"prod", "production", "stage", "staging"}
+    return settings.is_production_like()
+
+
+def _new_dashboard_csrf_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def _set_dashboard_csrf_cookie(response: JSONResponse, settings: Settings, token: str) -> None:
+    response.set_cookie(
+        key=CABINET_CSRF_COOKIE_NAME,
+        value=token,
+        max_age=max(1, int(settings.dashboard_session_ttl_hours)) * 3600,
+        httponly=False,
+        secure=_dashboard_cookie_secure(settings),
+        samesite="lax",
+        path="/",
+    )
 
 
 def _create_dashboard_session_token(username: str, role: str, settings: Settings) -> str:
@@ -188,6 +463,13 @@ def _require_dashboard_session(request: Request, allowed_roles: set[str] | None 
     if allowed_roles and session["role"] not in allowed_roles:
         raise HTTPException(status_code=403, detail="dashboard_forbidden")
     return session
+
+
+def _require_dashboard_csrf(request: Request) -> None:
+    cookie_token = (request.cookies.get(CABINET_CSRF_COOKIE_NAME) or "").strip()
+    header_token = (request.headers.get(CABINET_CSRF_HEADER_NAME) or "").strip()
+    if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token):
+        raise HTTPException(status_code=403, detail="dashboard_csrf_invalid")
 
 
 def _lead_row_to_cabinet_item(repo: Repository, lead, chat, ad) -> CabinetLeadListItem:
@@ -390,11 +672,40 @@ def cabinet_page(request: Request):
         gap: 10px;
         margin-bottom: 14px;
       }
+      .stage-funnel {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 14px;
+      }
       .card {
         background: var(--surface);
         border: 1px solid var(--line);
         border-radius: 14px;
         padding: 14px;
+      }
+      .stage-card {
+        cursor: pointer;
+        min-height: 92px;
+        padding: 12px;
+        transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+      }
+      .stage-card:hover {
+        border-color: #b9cee8;
+        box-shadow: 0 8px 20px rgba(14, 92, 168, 0.08);
+        transform: translateY(-1px);
+      }
+      .stage-card.is-active {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(14, 92, 168, 0.14);
+      }
+      .stage-card .k {
+        min-height: 34px;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .stage-card .v {
+        font-size: 24px;
       }
       .card .k { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
       .card .v { font-size: 28px; font-weight: 800; }
@@ -467,6 +778,13 @@ def cabinet_page(request: Request):
       .task-head { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin-bottom: 4px; }
       .task-meta { font-size: 12px; color: var(--muted); }
       .task-form { display: grid; grid-template-columns: 1fr 180px 110px; gap: 8px; margin-top: 8px; }
+      @media (max-width: 1280px) {
+        .stage-funnel {
+          overflow-x: auto;
+          grid-template-columns: repeat(7, minmax(148px, 148px));
+          padding-bottom: 4px;
+        }
+      }
       @media (max-width: 980px) {
         .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .filters { grid-template-columns: 1fr 1fr; }
@@ -479,8 +797,8 @@ def cabinet_page(request: Request):
     <div class="wrap">
       <div class="top">
         <div>
-          <h1>RentKontrol Cabinet</h1>
-          <div class="meta" id="who">loading...</div>
+          <h1>Кабинет RentKontrol</h1>
+          <div class="meta" id="who">загрузка...</div>
         </div>
         <button class="btn" id="logout">Выйти</button>
       </div>
@@ -491,9 +809,10 @@ def cabinet_page(request: Request):
         <article class="card"><div class="k">Неуспешно</div><div class="v bad" id="k-lost">0</div></article>
         <article class="card"><div class="k">Конверсия в оплату</div><div class="v" id="k-conv">0%</div></article>
       </section>
+      <section class="stage-funnel" id="stage-funnel"></section>
 
       <section class="filters">
-        <input id="q" placeholder="Поиск: контакт, summary, объявление, chat id" />
+        <input id="q" placeholder="Поиск: контакт, сводка, объявление, chat id" />
         <select id="status"><option value="">Все статусы</option></select>
         <select id="source"><option value="">Все источники</option></select>
         <button class="btn" id="apply">Применить</button>
@@ -507,7 +826,7 @@ def cabinet_page(request: Request):
               <th>Источник</th>
               <th>Объявление</th>
               <th>Контакт</th>
-              <th>Summary</th>
+              <th>Сводка</th>
               <th>Статус</th>
               <th>Создан</th>
               <th>Действия</th>
@@ -546,11 +865,96 @@ def cabinet_page(request: Request):
       let offset = 0;
       let funnelCache = null;
       let selectedLeadId = null;
-      const statusValues = ["NEW","CONTACT_RECEIVED","CALL_NEEDED","PAYMENT_PENDING","PAID","CHECKED_IN","LOST","IN_PROGRESS","WON","SPAM"];
+      const statusValues = ["NEW","IN_PROGRESS","PAYMENT_PENDING","PAID","CALL_NEEDED","LOST"];
       const taskStatusValues = ["OPEN","DONE","CANCELLED"];
+      const statusLabels = {
+        NEW: "Новый лид",
+        IN_PROGRESS: "Взял в работу",
+        PAYMENT_PENDING: "Договорился о встрече",
+        CALL_NEEDED: "Не может говорить/занят",
+        PAID: "Заселил",
+        LOST: "Неактуально",
+        CONTACT_RECEIVED: "Взял в работу",
+        CHECKED_IN: "Заселил",
+        WON: "Заселил",
+        SPAM: "Спам",
+      };
+      const taskStatusLabels = {
+        OPEN: "Открыта",
+        DONE: "Выполнена",
+        CANCELLED: "Отменена",
+      };
+
+      function statusLabel(code) {
+        return statusLabels[code] || code || "-";
+      }
+
+      function taskStatusLabel(code) {
+        return taskStatusLabels[code] || code || "-";
+      }
+
+      function sourceLabel(code) {
+        const value = String(code || "").toLowerCase();
+        if (value === "avito") return "Авито";
+        if (value === "youla") return "Юла";
+        return code || "-";
+      }
+
+      function updateStageFunnelActive() {
+        const selected = document.getElementById("status").value || "";
+        document.querySelectorAll(".stage-card").forEach((el) => {
+          const active = (el.getAttribute("data-status") || "") === selected;
+          el.classList.toggle("is-active", active);
+        });
+      }
+
+      function renderStageFunnel(byStatus) {
+        const root = document.getElementById("stage-funnel");
+        root.innerHTML = "";
+        const total = statusValues.reduce((acc, code) => acc + Number(byStatus?.[code] || 0), 0);
+
+        const items = [
+          {code: "", label: "Все этапы", count: total},
+          ...statusValues.map((code) => ({
+            code,
+            label: statusLabel(code),
+            count: Number(byStatus?.[code] || 0),
+          })),
+        ];
+
+        for (const item of items) {
+          const card = document.createElement("article");
+          card.className = "card stage-card";
+          card.setAttribute("data-status", item.code);
+          card.innerHTML = `<div class="k">${esc(item.label)}</div><div class="v">${item.count}</div>`;
+          card.addEventListener("click", async () => {
+            const statusEl = document.getElementById("status");
+            statusEl.value = item.code;
+            offset = 0;
+            await loadLeads();
+            updateStageFunnelActive();
+          });
+          root.appendChild(card);
+        }
+        updateStageFunnelActive();
+      }
 
       function esc(text) {
         return (text || "").replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',\"'\":'&#39;'}[m]));
+      }
+
+      function readCookie(name) {
+        const prefix = `${name}=`;
+        const parts = document.cookie.split(";").map((x) => x.trim());
+        const raw = parts.find((part) => part.startsWith(prefix));
+        return raw ? decodeURIComponent(raw.slice(prefix.length)) : "";
+      }
+
+      function cabinetJsonHeaders() {
+        const headers = {"Content-Type": "application/json"};
+        const csrf = readCookie("rk_cab_csrf");
+        if (csrf) headers["X-CSRF-Token"] = csrf;
+        return headers;
       }
 
       function fmtDate(value) {
@@ -574,7 +978,7 @@ def cabinet_page(request: Request):
       function renderLeadDetail(data) {
         const lead = data.lead;
         document.getElementById("lead-title").textContent = `Лид #${lead.id} — ${lead.ad_title || "-"}`;
-        document.getElementById("lead-meta").textContent = `${lead.source} | ${lead.status} | ${lead.external_chat_id}`;
+        document.getElementById("lead-meta").textContent = `${sourceLabel(lead.source)} | ${statusLabel(lead.status)} | ${lead.external_chat_id}`;
 
         const timeline = document.getElementById("timeline");
         timeline.innerHTML = "";
@@ -603,7 +1007,7 @@ def cabinet_page(request: Request):
               <div class="task-head">
                 <strong>${esc(task.title)}</strong>
                 <select data-task-id="${task.id}" class="task-status">
-                  ${taskStatusValues.map((s) => `<option value="${s}" ${s===task.status?"selected":""}>${s}</option>`).join("")}
+                  ${taskStatusValues.map((s) => `<option value="${s}" ${s===task.status?"selected":""}>${taskStatusLabel(s)}</option>`).join("")}
                 </select>
               </div>
               <div class="task-meta">Дедлайн: ${fmtDate(task.due_at)}</div>
@@ -641,7 +1045,7 @@ def cabinet_page(request: Request):
         if (dueRaw) payload.due_at = new Date(dueRaw).toISOString();
         const resp = await fetch(`/api/cabinet/leads/${selectedLeadId}/tasks`, {
           method: "POST",
-          headers: {"Content-Type": "application/json"},
+          headers: cabinetJsonHeaders(),
           body: JSON.stringify(payload),
         });
         if (!resp.ok) {
@@ -660,7 +1064,7 @@ def cabinet_page(request: Request):
             const status = el.value;
             const resp = await fetch(`/api/cabinet/tasks/${taskId}`, {
               method: "PATCH",
-              headers: {"Content-Type": "application/json"},
+              headers: cabinetJsonHeaders(),
               body: JSON.stringify({status}),
             });
             if (!resp.ok) {
@@ -693,14 +1097,15 @@ def cabinet_page(request: Request):
           const c = data.by_status[s] || 0;
           const opt = document.createElement("option");
           opt.value = s;
-          opt.textContent = `${s} (${c})`;
+          opt.textContent = `${statusLabel(s)} (${c})`;
           statusSelect.appendChild(opt);
         }
+        renderStageFunnel(data.by_status || {});
         const sourceSelect = document.getElementById("source");
         for (const [source, count] of Object.entries(data.by_source || {})) {
           const opt = document.createElement("option");
           opt.value = source;
-          opt.textContent = `${source} (${count})`;
+          opt.textContent = `${sourceLabel(source)} (${count})`;
           sourceSelect.appendChild(opt);
         }
       }
@@ -723,13 +1128,13 @@ def cabinet_page(request: Request):
           const summary = row.summary?.length > 180 ? row.summary.slice(0, 180) + "…" : (row.summary || "");
           tr.innerHTML = `
             <td class="mono">${row.id}</td>
-            <td><span class="state">${esc(row.source)}</span><div class="mono">${esc(row.external_chat_id)}</div></td>
+            <td><span class="state">${esc(sourceLabel(row.source))}</span><div class="mono">${esc(row.external_chat_id)}</div></td>
             <td>${esc(row.ad_title || "-")}</td>
             <td>${esc(row.contact_raw || "-")}</td>
             <td>${esc(summary)}</td>
             <td>
               <select data-lead-id="${row.id}" class="status-pick">
-                ${statusValues.map((s) => `<option value="${s}" ${s === row.status ? "selected" : ""}>${s}</option>`).join("")}
+                ${statusValues.map((s) => `<option value="${s}" ${s === row.status ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}
               </select>
             </td>
             <td>${fmtDate(row.created_at)}</td>
@@ -740,6 +1145,7 @@ def cabinet_page(request: Request):
         document.getElementById("page-info").textContent = `Показано ${data.items.length} из ${data.total}`;
         bindStatusPicks();
         bindLeadOpenControls();
+        updateStageFunnelActive();
         if (data.items.length && !selectedLeadId) {
           await loadLeadDetail(data.items[0].id);
         } else if (selectedLeadId && data.items.some((x) => String(x.id) === String(selectedLeadId))) {
@@ -754,7 +1160,7 @@ def cabinet_page(request: Request):
             const status = el.value;
             const resp = await fetch(`/api/cabinet/leads/${leadId}/status`, {
               method: "PATCH",
-              headers: {"Content-Type": "application/json"},
+              headers: cabinetJsonHeaders(),
               body: JSON.stringify({status}),
             });
             if (!resp.ok) {
@@ -784,6 +1190,7 @@ def cabinet_page(request: Request):
       document.getElementById("apply").addEventListener("click", async () => {
         offset = 0;
         await loadLeads();
+        updateStageFunnelActive();
       });
       document.getElementById("prev").addEventListener("click", async () => {
         offset = Math.max(0, offset - limit);
@@ -794,7 +1201,7 @@ def cabinet_page(request: Request):
         await loadLeads();
       });
       document.getElementById("logout").addEventListener("click", async () => {
-        await fetch("/api/cabinet/logout", {method: "POST"});
+        await fetch("/api/cabinet/logout", {method: "POST", headers: cabinetJsonHeaders()});
         location.href = "/cabinet/login";
       });
       document.getElementById("task-add").addEventListener("click", createTaskForSelectedLead);
@@ -832,6 +1239,7 @@ def cabinet_login(request: Request, body: CabinetLoginRequest):
         raise HTTPException(status_code=401, detail="invalid username or password")
 
     token = _create_dashboard_session_token(body.username, role, settings)
+    csrf_token = _new_dashboard_csrf_token()
     response = JSONResponse(content=CabinetAuthResponse(ok=True, role=role, username=body.username).model_dump())
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
@@ -842,13 +1250,17 @@ def cabinet_login(request: Request, body: CabinetLoginRequest):
         samesite="lax",
         path="/",
     )
+    _set_dashboard_csrf_cookie(response, settings, csrf_token)
     return response
 
 
 @router.post("/api/cabinet/logout", response_model=TelegramWebhookResponse)
-def cabinet_logout():
+def cabinet_logout(request: Request):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    _require_dashboard_csrf(request)
     response = JSONResponse(content=TelegramWebhookResponse(ok=True).model_dump())
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(CABINET_CSRF_COOKIE_NAME, path="/")
     return response
 
 
@@ -958,6 +1370,7 @@ def cabinet_create_lead_task(
     db: Session = Depends(get_db),
 ):
     _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    _require_dashboard_csrf(request)
     repo = Repository(db)
     row = repo.get_lead_with_context(lead_id=lead_id)
     if row is None:
@@ -979,6 +1392,7 @@ def cabinet_update_lead_status(
     db: Session = Depends(get_db),
 ):
     _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    _require_dashboard_csrf(request)
     status = body.status.strip().upper()
     if status not in CABINET_ALLOWED_STATUSES:
         raise HTTPException(status_code=400, detail="unsupported status")
@@ -1003,6 +1417,7 @@ def cabinet_update_task(
     db: Session = Depends(get_db),
 ):
     _require_dashboard_session(request, allowed_roles={"owner", "manager"})
+    _require_dashboard_csrf(request)
     if body.title is None and body.status is None and body.due_at is None and not body.clear_due_at:
         raise HTTPException(status_code=400, detail="empty_update")
     status = None
@@ -1026,6 +1441,7 @@ def cabinet_update_task(
 
 @router.get("/api/learning/status", response_model=LearningStatusResponse)
 def learning_status(request: Request, db: Session = Depends(get_db)):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
     status = request.app.state.container.self_learning_service.get_status(db)
     return LearningStatusResponse(
         enabled=status.enabled,
@@ -1041,10 +1457,12 @@ def learning_status(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/api/chats", response_model=list[ChatListItem])
 def list_chats(
+    request: Request,
     db: Session = Depends(get_db),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
     repo = Repository(db)
     rows = repo.list_chats(limit=limit, offset=offset)
     return [
@@ -1062,7 +1480,8 @@ def list_chats(
 
 
 @router.get("/api/chats/{chat_id}", response_model=ChatDetailResponse)
-def get_chat(chat_id: int, db: Session = Depends(get_db)):
+def get_chat(chat_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
     repo = Repository(db)
     result = repo.get_chat_detail(chat_id)
     if result is None:
@@ -1087,9 +1506,11 @@ def get_chat(chat_id: int, db: Session = Depends(get_db)):
 @router.get("/api/chats/external/{external_chat_id}/diagnostics", response_model=ChatDiagnosticsResponse)
 def get_chat_diagnostics(
     external_chat_id: str,
+    request: Request,
     db: Session = Depends(get_db),
     limit: int = Query(default=200, ge=10, le=1000),
 ):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
     repo = Repository(db)
     data = repo.get_chat_diagnostics(external_chat_id=external_chat_id, message_limit=limit, event_limit=limit)
     if data is None:
@@ -1174,10 +1595,12 @@ def get_chat_diagnostics(
 
 @router.get("/api/leads", response_model=list[LeadListItem])
 def list_leads(
+    request: Request,
     db: Session = Depends(get_db),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
     repo = Repository(db)
     leads = repo.list_leads(limit=limit, offset=offset)
     return [
@@ -1197,10 +1620,12 @@ def list_leads(
 
 @router.get("/api/logs/ignored", response_model=list[IgnoredLogItem])
 def list_ignored(
+    request: Request,
     db: Session = Depends(get_db),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
     repo = Repository(db)
     rows = repo.list_ignored_logs(limit=limit, offset=offset)
     return [
@@ -1219,6 +1644,7 @@ def list_ignored(
 
 @router.get("/api/prompts/real-estate", response_model=PromptResponse)
 def get_real_estate_prompt(request: Request, db: Session = Depends(get_db)):
+    _require_dashboard_session(request, allowed_roles={"owner", "manager"})
     prompt = request.app.state.container.prompt_service.get_real_estate_prompt(db)
     return PromptResponse(key=prompt.key, version=prompt.version, text=prompt.text, updated_at=prompt.updated_at)
 
@@ -1229,6 +1655,8 @@ def update_real_estate_prompt(
     request: Request,
     db: Session = Depends(get_db),
 ):
+    _require_dashboard_session(request, allowed_roles={"owner"})
+    _require_dashboard_csrf(request)
     prompt = request.app.state.container.prompt_service.update_real_estate_prompt(
         db=db,
         version=body.version,
@@ -1246,6 +1674,7 @@ def telegram_webhook(
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ):
     settings = _settings_from_app(request.app)
+    container = request.app.state.container
 
     if settings.telegram_webhook_secret:
         if x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
@@ -1253,6 +1682,85 @@ def telegram_webhook(
 
     message = update.get("message") or {}
     text = (message.get("text") or "").strip()
+    chat_id = str(message.get("chat", {}).get("id") or "").strip()
+    telegram_client = getattr(container, "telegram_client", None)
+
+    if text in {"/start", "/owner", OWNER_MENU_TEXT} and chat_id and telegram_client is not None:
+        telegram_client.send_message(chat_id=chat_id, text=_owner_menu_message(), reply_markup=_owner_reply_markup())
+        return TelegramWebhookResponse(ok=True)
+    if text == OWNER_LEADS_TODAY_TEXT and chat_id and telegram_client is not None:
+        telegram_client.send_message(chat_id=chat_id, text=_owner_leads_today_text(db, settings), reply_markup=_owner_reply_markup())
+        return TelegramWebhookResponse(ok=True)
+    if text == OWNER_SOURCES_TEXT and chat_id and telegram_client is not None:
+        telegram_client.send_message(chat_id=chat_id, text=_owner_sources_status_text(db, settings), reply_markup=_owner_reply_markup())
+        return TelegramWebhookResponse(ok=True)
+
+    callback_query = update.get("callback_query") or {}
+    callback_data = str(callback_query.get("data") or "").strip()
+    if callback_data.startswith("crm:lead:"):
+        callback_id = str(callback_query.get("id") or "").strip()
+        actor = callback_query.get("from") or {}
+        message = callback_query.get("message") or {}
+        parts = callback_data.split(":")
+        if len(parts) == 4 and parts[2].isdigit():
+            lead_id = int(parts[2])
+            action = parts[3]
+            actor_tg_id = str(actor.get("id") or "").strip()
+            actor_username = str(actor.get("username") or "").strip()
+            actor_name = _telegram_display_name(actor)
+            crm_client = getattr(container, "crm_ingest_client", None)
+            telegram_client = getattr(container, "telegram_client", None)
+            if crm_client is None or not getattr(crm_client, "enabled", False):
+                if callback_id and telegram_client is not None:
+                    telegram_client.answer_callback_query(callback_id, "CRM недоступна", show_alert=True)
+                return TelegramWebhookResponse(ok=True)
+            if not actor_tg_id:
+                if callback_id and telegram_client is not None:
+                    telegram_client.answer_callback_query(callback_id, "Не удалось определить Telegram-пользователя", show_alert=True)
+                return TelegramWebhookResponse(ok=True)
+            try:
+                result = crm_client.telegram_action(
+                    lead_id=lead_id,
+                    action=action,
+                    actor_tg_id=actor_tg_id,
+                    actor_username=actor_username or None,
+                    actor_name=actor_name,
+                    message_chat_id=str(message.get("chat", {}).get("id") or "").strip() or None,
+                    message_id=str(message.get("message_id") or "").strip() or None,
+                )
+                if callback_id and telegram_client is not None:
+                    if result is not None and not result.ok:
+                        locked_by = result.manager_name or "другим менеджером"
+                        telegram_client.answer_callback_query(callback_id, f"Уже закреплено за {locked_by}", show_alert=True)
+                        return TelegramWebhookResponse(ok=True)
+                    summary = f"{result.status_label}: {result.manager_name}" if result is not None else "Действие сохранено"
+                    telegram_client.answer_callback_query(callback_id, summary)
+                mapped_status = _lead_status_from_telegram_action(action)
+                if mapped_status and mapped_status in CABINET_ALLOWED_STATUSES:
+                    repo = Repository(db)
+                    lead = repo.update_lead_status(lead_id=lead_id, status=mapped_status)
+                    if lead is not None:
+                        db.commit()
+                if result is not None and telegram_client is not None:
+                    message_text = str(message.get("text") or "").strip()
+                    chat_id = str(message.get("chat", {}).get("id") or "").strip()
+                    message_id = message.get("message_id")
+                    if message_text and chat_id and isinstance(message_id, int):
+                        telegram_client.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=_telegram_attach_crm_footer(
+                                message_text,
+                                status_label=result.status_label or result.status,
+                                manager_name=result.manager_name or actor_name,
+                            ),
+                            reply_markup=message.get("reply_markup"),
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("telegram callback crm action failed lead=%s action=%s: %s", lead_id, action, exc)
+                if callback_id and telegram_client is not None:
+                    telegram_client.answer_callback_query(callback_id, "Не удалось сохранить действие", show_alert=True)
+        return TelegramWebhookResponse(ok=True)
 
     if text.startswith("/feedback"):
         # Format: /feedback <chat_external_id> <TAG> <comment>
@@ -1299,6 +1807,8 @@ def youla_webhook(
         "payload.message",
         "payload.text",
     )
+    if not message_text:
+        message_text = _infer_youla_system_text(payload)
     chat_id = _pick_str(payload, "chat_id", "chatId", "conversation_id", "conversationId", "data.chat_id")
     message_id = _pick_str(payload, "id", "message_id", "messageId", "data.id", "data.message_id")
     sender_id = _pick_str(payload, "sender_id", "senderId", "sender.id", "from.id", "author_id", "data.sender_id")
@@ -1408,46 +1918,4 @@ def youla_webhook_health():
 
 @router.get("/admin", response_class=HTMLResponse)
 def admin_page():
-    html = """
-<!doctype html>
-<html>
-  <head>
-    <meta charset='utf-8' />
-    <title>Avito AI Assistant Admin</title>
-    <style>
-      body { font-family: sans-serif; max-width: 980px; margin: 24px auto; }
-      h1 { margin-bottom: 0; }
-      .block { margin: 24px 0; padding: 16px; border: 1px solid #ddd; border-radius: 8px; }
-      pre { white-space: pre-wrap; word-break: break-word; background: #f7f7f7; padding: 12px; }
-    </style>
-  </head>
-  <body>
-    <h1>Avito AI Assistant</h1>
-    <p>MVP admin snapshot</p>
-    <div class='block'>
-      <h2>Prompt</h2>
-      <pre id='prompt'>loading...</pre>
-    </div>
-    <div class='block'>
-      <h2>Ignored Logs</h2>
-      <pre id='ignored'>loading...</pre>
-    </div>
-    <div class='block'>
-      <h2>Learning Status</h2>
-      <pre id='learning'>loading...</pre>
-    </div>
-    <script>
-      async function load() {
-        const prompt = await fetch('/api/prompts/real-estate').then(r => r.json());
-        document.getElementById('prompt').textContent = JSON.stringify(prompt, null, 2);
-        const ignored = await fetch('/api/logs/ignored?limit=20').then(r => r.json());
-        document.getElementById('ignored').textContent = JSON.stringify(ignored, null, 2);
-        const learning = await fetch('/api/learning/status').then(r => r.json());
-        document.getElementById('learning').textContent = JSON.stringify(learning, null, 2);
-      }
-      load();
-    </script>
-  </body>
-</html>
-"""
-    return HTMLResponse(content=html)
+    return RedirectResponse(url="/cabinet", status_code=302)

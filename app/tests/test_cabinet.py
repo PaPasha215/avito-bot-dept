@@ -18,7 +18,37 @@ from app.types import MessageDirection
 def _build_app(settings: Settings, session_factory) -> FastAPI:
     app = FastAPI()
     app.include_router(router)
-    app.state.container = SimpleNamespace(settings=settings)
+    prompt_service = SimpleNamespace(
+        get_real_estate_prompt=lambda db: SimpleNamespace(
+            key="real_estate",
+            version="REAL_ESTATE_PROMPT_V1",
+            text="x" * 40,
+            updated_at=None,
+        ),
+        update_real_estate_prompt=lambda db, version, text: SimpleNamespace(
+            key="real_estate",
+            version=version,
+            text=text,
+            updated_at=None,
+        ),
+    )
+    learning_service = SimpleNamespace(
+        get_status=lambda db: SimpleNamespace(
+            enabled=True,
+            active_version="SL-1",
+            stable_version="SL-1",
+            candidate_started_at=None,
+            last_run_at=None,
+            active_examples=1,
+            stable_examples=1,
+            total_examples=1,
+        )
+    )
+    app.state.container = SimpleNamespace(
+        settings=settings,
+        prompt_service=prompt_service,
+        self_learning_service=learning_service,
+    )
 
     def override_get_db():
         with session_factory() as db:
@@ -88,6 +118,19 @@ def test_cabinet_login_and_me():
     assert me.status_code == 200
     assert me.json()["username"] == "owner"
 
+    cabinet = client.get("/cabinet")
+    assert cabinet.status_code == 200
+    html = cabinet.text
+    assert 'class="stage-funnel"' in html
+    assert 'const statusValues = ["NEW","IN_PROGRESS","PAYMENT_PENDING","PAID","CALL_NEEDED","LOST"]' in html
+    assert 'NEW: "Новый лид"' in html
+    assert 'PAYMENT_PENDING: "Договорился о встрече"' in html
+    assert 'PAID: "Заселил"' in html
+    assert '{code: "", label: "Все этапы", count: total}' in html
+
+    protected = client.get("/api/chats")
+    assert protected.status_code == 200
+
 
 def test_cabinet_leads_and_status_update():
     session_factory = _build_session_factory()
@@ -106,6 +149,8 @@ def test_cabinet_leads_and_status_update():
 
     login = client.post("/api/cabinet/login", json={"username": "owner", "password": "owner-pass"})
     assert login.status_code == 200
+    csrf = client.cookies.get("rk_cab_csrf")
+    assert csrf
 
     funnel = client.get("/api/cabinet/funnel")
     assert funnel.status_code == 200
@@ -118,7 +163,11 @@ def test_cabinet_leads_and_status_update():
     assert body["items"][0]["source"] == "youla"
     lead_id = body["items"][0]["id"]
 
-    update = client.patch(f"/api/cabinet/leads/{lead_id}/status", json={"status": "PAID"})
+    update = client.patch(
+        f"/api/cabinet/leads/{lead_id}/status",
+        json={"status": "PAID"},
+        headers={"X-CSRF-Token": csrf},
+    )
     assert update.status_code == 200
     assert update.json()["status"] == "PAID"
 
@@ -132,12 +181,17 @@ def test_cabinet_leads_and_status_update():
     new_task = client.post(
         f"/api/cabinet/leads/{lead_id}/tasks",
         json={"title": "Перезвонить клиенту"},
+        headers={"X-CSRF-Token": csrf},
     )
     assert new_task.status_code == 200
     task_id = new_task.json()["id"]
     assert new_task.json()["status"] == "OPEN"
 
-    done_task = client.patch(f"/api/cabinet/tasks/{task_id}", json={"status": "DONE"})
+    done_task = client.patch(
+        f"/api/cabinet/tasks/{task_id}",
+        json={"status": "DONE"},
+        headers={"X-CSRF-Token": csrf},
+    )
     assert done_task.status_code == 200
     assert done_task.json()["status"] == "DONE"
 
@@ -148,6 +202,7 @@ def test_cabinet_rejects_default_session_secret():
         polling_enabled=False,
         dashboard_owner_username="owner",
         dashboard_owner_password="owner-pass",
+        dashboard_session_secret="change-this-dashboard-secret",
     )
     app = _build_app(settings=settings, session_factory=session_factory)
     client = TestClient(app)
@@ -155,3 +210,41 @@ def test_cabinet_rejects_default_session_secret():
     login = client.post("/api/cabinet/login", json={"username": "owner", "password": "owner-pass"})
     assert login.status_code == 503
     assert "session secret" in login.json()["detail"]
+
+
+def test_cabinet_state_change_requires_csrf():
+    session_factory = _build_session_factory()
+    _seed_lead(session_factory)
+    settings = Settings(
+        polling_enabled=False,
+        dashboard_owner_username="owner",
+        dashboard_owner_password="owner-pass",
+        dashboard_session_secret="test-secret",
+    )
+    app = _build_app(settings=settings, session_factory=session_factory)
+    client = TestClient(app)
+
+    login = client.post("/api/cabinet/login", json={"username": "owner", "password": "owner-pass"})
+    assert login.status_code == 200
+
+    leads = client.get("/api/cabinet/leads")
+    lead_id = leads.json()["items"][0]["id"]
+    update = client.patch(f"/api/cabinet/leads/{lead_id}/status", json={"status": "PAID"})
+    assert update.status_code == 403
+
+
+def test_public_sensitive_api_requires_auth():
+    session_factory = _build_session_factory()
+    settings = Settings(
+        polling_enabled=False,
+        dashboard_owner_username="owner",
+        dashboard_owner_password="owner-pass",
+        dashboard_session_secret="test-secret",
+    )
+    app = _build_app(settings=settings, session_factory=session_factory)
+    client = TestClient(app)
+
+    assert client.get("/api/chats").status_code == 401
+    assert client.get("/api/leads").status_code == 401
+    assert client.get("/api/learning/status").status_code == 401
+    assert client.get("/api/prompts/real-estate").status_code == 401
