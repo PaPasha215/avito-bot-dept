@@ -1,5 +1,61 @@
 # Changelog
 
+## 2026-03-01 - quality hardening and verified test baseline
+
+### Fixed
+- Закрыт риск self-learning для `WRONG_DOMAIN`:
+  - negative lesson больше не учит модель отвечать там, где правило требует молчать.
+- Кабинет больше не работает с дефолтным `DASHBOARD_SESSION_SECRET`:
+  - добавлен runtime guard;
+  - `validate-env` теперь требует явный `DASHBOARD_SESSION_SECRET`, если кабинет включен.
+- Daily operational report больше не отмечается как выполненный, если Telegram chat для отправки не настроен.
+- Усилен router-guard для off-topic внутри real-estate объявлений:
+  - авто-тематика;
+  - нецелевое использование жилья;
+  - часть сервисных/поставщицких сообщений.
+- Усилен budget/price detector:
+  - корректно распознаются короткие форматы вроде `800р`, `20к`.
+
+### Changed
+- `chat.last_message_at` теперь хранит фактическое время сообщения, а не текущее серверное время при записи.
+- Актуализированы тесты `stats_reporting`, `cabinet`, `heartbeat`, `processor`, `router`, `self_learning` под текущий рабочий контракт.
+
+### Verified
+- Установлен `pytest`.
+- Полный автотестовый прогон успешен:
+  - `python3 -m pytest`
+  - результат: `40 passed`
+
+## 2026-03-01 - prod sync checkpoint
+
+### Stable state
+- Локальный workspace синхронизирован с фактическим продовым кодом на VPS.
+- Прод-контур на VPS поднят и отвечает, `app` контейнер пересобран и запущен успешно.
+- Ежедневная Telegram-сводка переведена на операционные метрики бота:
+  - `ANOMALY`
+  - `Неотвеченные`
+  - `Новые контакты`
+- Ручной форс `stats-report-once` на проде выполнен успешно, Telegram вернул `HTTP 200`.
+- Последняя подтвержденная отправка daily report зафиксирована в БД:
+  - `stats_report_last_run_at=2026-03-01T08:50:46.304862+00:00`
+- Дублирующий daily-report из heartbeat отключен на проде, срочные alert'ы оставлены только для необработанных входящих и ошибок poller.
+
+### Added
+- Синхронизированы в локальный репозиторий продовые файлы, которых раньше не было локально:
+  - `app/integrations/youla.py`
+  - `app/integrations/crm_ingest.py`
+  - `app/services/heartbeat.py`
+  - `app/tests/test_cabinet.py`
+  - `app/tests/test_heartbeat.py`
+
+### Changed
+- `StatsReportingService` больше не отправляет weekly analytics по объявлениям, а формирует короткую ежедневную операционную сводку по данным БД бота.
+- `app/cli.py` (`stats-report-once`) возвращает новые поля:
+  - `anomaly_count`
+  - `unanswered_count`
+  - `new_contacts_count`
+- Локальный `.env` снова соответствует текущей схеме `Settings`, `validate-env` проходит штатно.
+
 ## 2026-02-17 - MVP v1.0 checkpoint
 
 ### Stable state

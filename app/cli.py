@@ -26,6 +26,9 @@ def cmd_validate_env() -> int:
     }
 
     missing = [k for k, v in required.items() if not v]
+    if settings.dashboard_owner_username or settings.dashboard_manager_username:
+        if settings.dashboard_uses_default_session_secret():
+            missing.append("DASHBOARD_SESSION_SECRET")
     if missing:
         print("Missing required env vars:")
         for key in missing:
@@ -284,10 +287,9 @@ def cmd_stats_report_once() -> int:
                     "report_date": result.report_date,
                     "sent": result.sent,
                     "target_chat_id": result.target_chat_id,
-                    "items_total": result.items_total,
-                    "top_reach_count": result.top_reach_count,
-                    "top_conversion_count": result.top_conversion_count,
-                    "low_conversion_count": result.low_conversion_count,
+                    "anomaly_count": result.anomaly_count,
+                    "unanswered_count": result.unanswered_count,
+                    "new_contacts_count": result.new_contacts_count,
                 },
                 ensure_ascii=False,
             )

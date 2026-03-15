@@ -5,11 +5,13 @@ import logging
 from app.core.config import Settings
 from app.db import SessionLocal, init_db
 from app.integrations.avito import AvitoClient
+from app.integrations.crm_ingest import CrmIngestClient
 from app.integrations.openai_client import OpenAIClient
 from app.integrations.telegram import TelegramClient
 from app.integrations.youla import YoulaClient
 from app.services.classifier import DomainClassifier
 from app.services.cleanup import RetentionService
+from app.services.heartbeat import BotHealthHeartbeatService
 from app.services.lead_detector import LeadDetector
 from app.services.poller import Poller
 from app.services.processor import MessageProcessor
@@ -54,12 +56,22 @@ class AppContainer:
             bot_token=settings.telegram_bot_token,
             api_base=settings.telegram_api_base,
         )
+        self.crm_ingest_client = CrmIngestClient(
+            enabled=settings.crm_ingest_enabled,
+            ingest_url=settings.crm_ingest_url,
+            ingest_token=settings.crm_ingest_token,
+            timeout_seconds=settings.crm_ingest_timeout_seconds,
+        )
 
         self.prompt_service = PromptService(settings=settings)
         self.self_learning_service = SelfLearningService(settings=settings)
         self.stats_reporting_service = StatsReportingService(
             settings=settings,
             avito_client=self.avito_client,
+            telegram_client=self.telegram_client,
+        )
+        self.heartbeat_service = BotHealthHeartbeatService(
+            settings=settings,
             telegram_client=self.telegram_client,
         )
         classifier = DomainClassifier(openai_client=self.openai_client)
@@ -75,8 +87,10 @@ class AppContainer:
             prompt_service=self.prompt_service,
             self_learning_service=self.self_learning_service,
             stats_reporting_service=self.stats_reporting_service,
+            heartbeat_service=self.heartbeat_service,
             lead_detector=LeadDetector(),
             retention_service=RetentionService(),
+            crm_ingest_client=self.crm_ingest_client,
         )
 
         self.poller = Poller(self.processor, interval_seconds=settings.poll_interval_seconds)
@@ -100,3 +114,4 @@ class AppContainer:
         self.youla_client.close()
         self.openai_client.close()
         self.telegram_client.close()
+        self.crm_ingest_client.close()

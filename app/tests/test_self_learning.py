@@ -92,3 +92,24 @@ def test_build_augmented_prompt_uses_learning_examples(db_session):
     assert used_version == version
     assert used_count == 1
     assert "SELF_LEARNING_CONTEXT" in prompt
+
+
+def test_wrong_domain_fail_lesson_keeps_silent_recommendation():
+    service = SelfLearningService(
+        Settings(
+            polling_enabled=False,
+            self_learning_enabled=True,
+        )
+    )
+
+    intent, bad_reply, better_reply, rule_text, _ = service._build_fail_lesson(
+        tag="WRONG_DOMAIN",
+        comment="Это был нерелевантный диалог",
+        latest_user="Сколько расход масла?",
+        latest_bot="Здравствуйте! Подскажите номер телефона.",
+    )
+
+    assert intent == "Сколько расход масла?"
+    assert bad_reply == "Здравствуйте! Подскажите номер телефона."
+    assert "не отвечай клиенту" in rule_text
+    assert better_reply == ""
