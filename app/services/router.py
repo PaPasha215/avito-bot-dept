@@ -21,6 +21,16 @@ class RouterService:
                 reason="ad_category_non_real_estate",
             )
 
+        # If ad context is explicitly real-estate, trust listing metadata.
+        # This prevents false silences on short/neutral user messages.
+        if category_domain == Domain.REAL_ESTATE:
+            return RoutingResult(
+                decision=ChatDecision.REPLY,
+                domain=Domain.REAL_ESTATE,
+                confidence=1.0,
+                reason="ad_category_real_estate",
+            )
+
         dialog_cls = self.classifier.classify(ad_title=ad_title, recent_messages=recent_messages)
 
         # If chat context strongly looks non-real-estate, keep silent.

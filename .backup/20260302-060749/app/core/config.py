@@ -47,12 +47,7 @@ DEFAULT_REAL_ESTATE_PROMPT = """# 🧠 ЕДИНЫЙ ПРОМПТ ДЛЯ CHATGPT 
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
 
     app_name: str = "Avito AI Assistant"
     environment: str = "dev"
@@ -62,9 +57,6 @@ class Settings(BaseSettings):
     polling_enabled: bool = True
     poll_interval_seconds: int = 10
     retention_days: int = 90
-    max_request_body_bytes: int = 262_144
-    trusted_hosts_raw: str = ""
-    app_enable_public_docs: bool | None = None
 
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
@@ -85,6 +77,15 @@ class Settings(BaseSettings):
     self_learning_promote_min_leads: int = 3
     stats_reporting_enabled: bool = False
     stats_report_interval_hours: int = 24
+    stats_report_lookback_days: int = 14
+    stats_report_limit: int = 60
+    stats_report_item_detail_limit: int = 20
+    stats_report_min_views_for_conversion: int = 30
+    stats_report_low_conversion_threshold: float = 3.5
+    stats_report_weekday: int = 1
+    stats_report_hour: int = 9
+    stats_report_minute: int = 0
+    stats_report_timezone: str = "Asia/Yekaterinburg"
     bot_health_enabled: bool = True
     bot_health_interval_minutes: int = 30
     bot_health_alert_repeat_minutes: int = 60
@@ -125,7 +126,6 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_api_base: str = "https://api.telegram.org"
     telegram_leads_chat_id: str | None = None
-    telegram_manager_chat_id: str | None = None
     telegram_qa_chat_id: str | None = None
     telegram_stats_chat_id: str | None = None
     telegram_webhook_secret: str | None = None
@@ -146,20 +146,6 @@ class Settings(BaseSettings):
     dashboard_manager_password: str | None = None
     dashboard_session_secret: str = "change-this-dashboard-secret"
     dashboard_session_ttl_hours: int = 24
-
-    def dashboard_uses_default_session_secret(self) -> bool:
-        return self.dashboard_session_secret.strip() == "change-this-dashboard-secret"
-
-    def is_production_like(self) -> bool:
-        return self.environment.strip().lower() in {"prod", "production", "stage", "staging"}
-
-    def public_docs_enabled(self) -> bool:
-        if self.app_enable_public_docs is not None:
-            return bool(self.app_enable_public_docs)
-        return not self.is_production_like()
-
-    def trusted_hosts(self) -> list[str]:
-        return [item.strip() for item in self.trusted_hosts_raw.split(",") if item.strip()]
 
 
 @lru_cache(maxsize=1)

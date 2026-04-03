@@ -672,40 +672,11 @@ def cabinet_page(request: Request):
         gap: 10px;
         margin-bottom: 14px;
       }
-      .stage-funnel {
-        display: grid;
-        grid-template-columns: repeat(7, minmax(0, 1fr));
-        gap: 8px;
-        margin-bottom: 14px;
-      }
       .card {
         background: var(--surface);
         border: 1px solid var(--line);
         border-radius: 14px;
         padding: 14px;
-      }
-      .stage-card {
-        cursor: pointer;
-        min-height: 92px;
-        padding: 12px;
-        transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
-      }
-      .stage-card:hover {
-        border-color: #b9cee8;
-        box-shadow: 0 8px 20px rgba(14, 92, 168, 0.08);
-        transform: translateY(-1px);
-      }
-      .stage-card.is-active {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 2px rgba(14, 92, 168, 0.14);
-      }
-      .stage-card .k {
-        min-height: 34px;
-        font-size: 12px;
-        line-height: 1.35;
-      }
-      .stage-card .v {
-        font-size: 24px;
       }
       .card .k { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
       .card .v { font-size: 28px; font-weight: 800; }
@@ -778,13 +749,6 @@ def cabinet_page(request: Request):
       .task-head { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin-bottom: 4px; }
       .task-meta { font-size: 12px; color: var(--muted); }
       .task-form { display: grid; grid-template-columns: 1fr 180px 110px; gap: 8px; margin-top: 8px; }
-      @media (max-width: 1280px) {
-        .stage-funnel {
-          overflow-x: auto;
-          grid-template-columns: repeat(7, minmax(148px, 148px));
-          padding-bottom: 4px;
-        }
-      }
       @media (max-width: 980px) {
         .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .filters { grid-template-columns: 1fr 1fr; }
@@ -809,7 +773,7 @@ def cabinet_page(request: Request):
         <article class="card"><div class="k">Неуспешно</div><div class="v bad" id="k-lost">0</div></article>
         <article class="card"><div class="k">Конверсия в оплату</div><div class="v" id="k-conv">0%</div></article>
       </section>
-      <section class="stage-funnel" id="stage-funnel"></section>
+      <section class="cards" id="stage-funnel"></section>
 
       <section class="filters">
         <input id="q" placeholder="Поиск: контакт, сводка, объявление, chat id" />
@@ -865,18 +829,18 @@ def cabinet_page(request: Request):
       let offset = 0;
       let funnelCache = null;
       let selectedLeadId = null;
-      const statusValues = ["NEW","IN_PROGRESS","PAYMENT_PENDING","PAID","CALL_NEEDED","LOST"];
+      const statusValues = ["NEW","IN_PROGRESS","PAYMENT_PENDING","CALL_NEEDED","PAID","LOST"];
       const taskStatusValues = ["OPEN","DONE","CANCELLED"];
       const statusLabels = {
-        NEW: "Новый лид",
+        NEW: "Новый",
         IN_PROGRESS: "Взял в работу",
-        PAYMENT_PENDING: "Договорился о встрече",
+        PAYMENT_PENDING: "Договорился о встрече (заселяется)",
         CALL_NEEDED: "Не может говорить/занят",
-        PAID: "Заселил",
+        PAID: "Заселил (сделка состоялась)",
         LOST: "Неактуально",
         CONTACT_RECEIVED: "Взял в работу",
-        CHECKED_IN: "Заселил",
-        WON: "Заселил",
+        CHECKED_IN: "Заселил (сделка состоялась)",
+        WON: "Заселил (сделка состоялась)",
         SPAM: "Спам",
       };
       const taskStatusLabels = {
@@ -904,7 +868,7 @@ def cabinet_page(request: Request):
         const selected = document.getElementById("status").value || "";
         document.querySelectorAll(".stage-card").forEach((el) => {
           const active = (el.getAttribute("data-status") || "") === selected;
-          el.classList.toggle("is-active", active);
+          el.style.outline = active ? "2px solid #2b6cb0" : "none";
         });
       }
 
@@ -912,30 +876,35 @@ def cabinet_page(request: Request):
         const root = document.getElementById("stage-funnel");
         root.innerHTML = "";
         const total = statusValues.reduce((acc, code) => acc + Number(byStatus?.[code] || 0), 0);
-
-        const items = [
-          {code: "", label: "Все этапы", count: total},
-          ...statusValues.map((code) => ({
-            code,
-            label: statusLabel(code),
-            count: Number(byStatus?.[code] || 0),
-          })),
-        ];
-
-        for (const item of items) {
+        for (const code of statusValues) {
+          const count = Number(byStatus?.[code] || 0);
           const card = document.createElement("article");
           card.className = "card stage-card";
-          card.setAttribute("data-status", item.code);
-          card.innerHTML = `<div class="k">${esc(item.label)}</div><div class="v">${item.count}</div>`;
+          card.setAttribute("data-status", code);
+          card.style.cursor = "pointer";
+          card.innerHTML = `<div class="k">${esc(statusLabel(code))}</div><div class="v">${count}</div>`;
           card.addEventListener("click", async () => {
             const statusEl = document.getElementById("status");
-            statusEl.value = item.code;
+            statusEl.value = code;
             offset = 0;
             await loadLeads();
             updateStageFunnelActive();
           });
           root.appendChild(card);
         }
+        const all = document.createElement("article");
+        all.className = "card stage-card";
+        all.setAttribute("data-status", "");
+        all.style.cursor = "pointer";
+        all.innerHTML = `<div class="k">Все этапы</div><div class="v">${total}</div>`;
+        all.addEventListener("click", async () => {
+          const statusEl = document.getElementById("status");
+          statusEl.value = "";
+          offset = 0;
+          await loadLeads();
+          updateStageFunnelActive();
+        });
+        root.appendChild(all);
         updateStageFunnelActive();
       }
 

@@ -55,7 +55,55 @@ class YoulaClient:
             payload["images"] = images
 
         url = f"{self.api_base}/messages"
-        resp = self._client.post(url, headers=self._headers(), json=payload)
-        resp.raise_for_status()
+        try:
+            resp = self._client.post(url, headers=self._headers(), json=payload)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body = ""
+            try:
+                body = exc.response.text
+            except Exception:
+                body = ""
+            logger.error(
+                "Youla send_message failed: status=%s url=%s body=%s payload_keys=%s",
+                exc.response.status_code,
+                url,
+                body[:500],
+                list(payload.keys()),
+            )
+            raise
+        except httpx.HTTPError:
+            logger.exception("Youla send_message request error: url=%s", url)
+            raise
         return resp.json() if resp.text else {}
 
+    def get_product(self, product_id: str) -> dict:
+        if not self.enabled:
+            raise RuntimeError("Youla client is not enabled")
+        url = f"{self.api_base}/products/{product_id}"
+        try:
+            resp = self._client.get(url, headers=self._headers())
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body = ""
+            try:
+                body = exc.response.text
+            except Exception:
+                body = ""
+            logger.warning(
+                "Youla get_product failed: status=%s product_id=%s body=%s",
+                exc.response.status_code,
+                product_id,
+                body[:500],
+            )
+            raise
+        except httpx.HTTPError:
+            logger.exception("Youla get_product request error: product_id=%s", product_id)
+            raise
+
+        payload = resp.json() if resp.text else {}
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                return data
+        return {}

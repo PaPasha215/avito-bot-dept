@@ -26,20 +26,10 @@ def cmd_validate_env() -> int:
     }
 
     missing = [k for k, v in required.items() if not v]
-    if settings.dashboard_owner_username or settings.dashboard_manager_username:
-        if settings.dashboard_uses_default_session_secret():
-            missing.append("DASHBOARD_SESSION_SECRET")
-    if settings.is_production_like() and not settings.trusted_hosts():
-        missing.append("TRUSTED_HOSTS_RAW")
     if missing:
         print("Missing required env vars:")
         for key in missing:
             print(f"- {key}")
-        return 2
-
-    if settings.is_production_like() and settings.public_docs_enabled():
-        print("Unsafe env config:")
-        print("- APP_ENABLE_PUBLIC_DOCS must be false in production-like environments")
         return 2
 
     print("Environment config looks good.")

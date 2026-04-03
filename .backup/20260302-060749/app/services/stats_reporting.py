@@ -27,7 +27,7 @@ class StatsReportRunResult:
 class StatsReportingService:
     LAST_RUN_KEY = "stats_report_last_run_at"
 
-    def __init__(self, settings: Settings, telegram_client: TelegramClient):
+    def __init__(self, settings: Settings, avito_client, telegram_client: TelegramClient):
         self.settings = settings
         self.telegram_client = telegram_client
 
@@ -35,23 +35,19 @@ class StatsReportingService:
     def enabled(self) -> bool:
         return bool(self.settings.stats_reporting_enabled)
 
-    def _now_utc(self) -> datetime:
-        return utcnow()
-
     def run_if_due(self, db: Session) -> StatsReportRunResult | None:
         if not self.enabled:
             return None
 
         repo = Repository(db)
-        now = self._now_utc()
+        now = utcnow()
         last_run = self._parse_dt(repo.get_setting(self.LAST_RUN_KEY))
         if last_run is not None and (now - last_run) < timedelta(hours=max(1, self.settings.stats_report_interval_hours)):
             return None
 
         result = self.report_once(db)
-        if result.sent:
-            repo.set_setting(self.LAST_RUN_KEY, now.isoformat())
-            db.commit()
+        repo.set_setting(self.LAST_RUN_KEY, now.isoformat())
+        db.commit()
         return result
 
     def report_once(self, db: Session) -> StatsReportRunResult:
@@ -59,7 +55,7 @@ class StatsReportingService:
         if not target_chat_id:
             logger.info("Stats report skipped: target Telegram chat is not configured")
             return StatsReportRunResult(
-                report_date=self._now_utc().date().isoformat(),
+                report_date=utcnow().date().isoformat(),
                 sent=False,
                 target_chat_id=None,
                 anomaly_count=0,
@@ -68,7 +64,7 @@ class StatsReportingService:
             )
 
         repo = Repository(db)
-        report_ended_at = self._now_utc()
+        report_ended_at = utcnow()
         report_started_at = report_ended_at - timedelta(hours=max(1, self.settings.stats_report_interval_hours))
         metrics = repo.get_operational_report_metrics(
             since=report_started_at,

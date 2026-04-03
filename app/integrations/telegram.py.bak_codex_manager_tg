@@ -27,11 +27,11 @@ class TelegramClient:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
         return f"{self.api_base}/bot{self.bot_token}/{method}"
 
-    def _post(self, method: str, payload: dict) -> dict | None:
+    def send_message(self, chat_id: str, text: str) -> None:
         if not self.enabled:
-            logger.warning("Telegram disabled, method=%s skipped", method)
-            return None
-        resp = self._client.post(self._method_url(method), json=payload)
+            logger.warning("Telegram disabled, message skipped")
+            return
+        resp = self._client.post(self._method_url("sendMessage"), json={"chat_id": chat_id, "text": text})
         if resp.is_error:
             detail = resp.text
             try:
@@ -45,45 +45,6 @@ class TelegramClient:
                 request=resp.request,
                 response=resp,
             )
-        if not resp.text:
-            return None
-        try:
-            data = resp.json()
-        except ValueError:
-            return None
-        return data if isinstance(data, dict) else None
-
-    def send_message(self, chat_id: str, text: str, reply_markup: dict | None = None) -> None:
-        payload = {"chat_id": chat_id, "text": text}
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        self._post("sendMessage", payload)
-
-    def answer_callback_query(self, callback_query_id: str, text: str | None = None, show_alert: bool = False) -> None:
-        payload = {
-            "callback_query_id": callback_query_id,
-            "show_alert": bool(show_alert),
-        }
-        if text:
-            payload["text"] = text
-        self._post("answerCallbackQuery", payload)
-
-    def edit_message_text(
-        self,
-        *,
-        chat_id: str,
-        message_id: int,
-        text: str,
-        reply_markup: dict | None = None,
-    ) -> None:
-        payload = {
-            "chat_id": chat_id,
-            "message_id": int(message_id),
-            "text": text,
-        }
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        self._post("editMessageText", payload)
 
     def send_lead_card(
         self,
@@ -93,12 +54,12 @@ class TelegramClient:
         ad_url: str | None,
         marketplace: str,
         chat_url: str | None,
+        external_chat_id: str | None,
         customer_name: str | None,
         contact_raw: str,
         summary: str,
         context_lines: list[str],
         status: LeadStatus = LeadStatus.NEW,
-        actions: list[list[dict[str, str]]] | None = None,
     ) -> None:
         summary_compact = self._trim_text(summary, limit=700)
         source_label = self._marketplace_label(marketplace)
@@ -107,6 +68,8 @@ class TelegramClient:
             "",
             ad_title,
         ]
+        if external_chat_id:
+            lines.append(f"чат ID: {external_chat_id}")
         if chat_url:
             lines.extend(["Чат", chat_url])
         if ad_url:
@@ -118,7 +81,7 @@ class TelegramClient:
                 f"Контакт: {contact_raw}",
                 f"Статус: {status.value}",
                 "",
-                "Сводка:",
+                "Summary:",
                 summary_compact,
                 "",
                 "Последние реплики:",
@@ -127,8 +90,7 @@ class TelegramClient:
         for item in context_lines[-3:]:
             lines.append(f"- {self._trim_text(item, limit=220)}")
 
-        reply_markup = {"inline_keyboard": actions} if actions else None
-        self.send_message(leads_chat_id, "\n".join(lines), reply_markup=reply_markup)
+        self.send_message(leads_chat_id, "\n".join(lines))
 
     @staticmethod
     def _marketplace_label(marketplace: str | None) -> str:

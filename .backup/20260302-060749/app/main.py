@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+from fastapi import FastAPI
+
 from app.api.routes import router
 from app.container import AppContainer
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.core.security import build_fastapi_app
 
 settings = get_settings()
 configure_logging(settings.log_level)
 
 container = AppContainer(settings=settings)
 
-app = build_fastapi_app(settings=settings)
+app = FastAPI(title=settings.app_name)
 app.include_router(router)
 app.state.container = container
 

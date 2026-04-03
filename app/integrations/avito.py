@@ -91,7 +91,11 @@ class AvitoClient:
             params["cursor"] = cursor
 
         resp = self._client.get(updates_url, headers=self._headers(), params=params)
-        if resp.status_code == 401:
+        if resp.status_code in {401, 403}:
+            logger.warning(
+                "Avito updates endpoint returned %s, refreshing token and retrying once",
+                resp.status_code,
+            )
             self._token = None
             resp = self._client.get(updates_url, headers=self._headers(), params=params)
         resp.raise_for_status()
@@ -250,7 +254,12 @@ class AvitoClient:
 
             try:
                 resp = self._client.get(url, headers=self._headers(), params={"limit": limit})
-                if resp.status_code == 401:
+                if resp.status_code in {401, 403}:
+                    logger.warning(
+                        "Avito chat history endpoint returned %s for chat %s, refreshing token and retrying once",
+                        resp.status_code,
+                        chat_id,
+                    )
                     self._token = None
                     resp = self._client.get(url, headers=self._headers(), params={"limit": limit})
 
@@ -350,7 +359,7 @@ class AvitoClient:
             return {}
         url = self._resolve_url_template(self.chat_context_url_template, chat_id=chat_id)
         resp = self._client.get(url, headers=self._headers())
-        if resp.status_code == 401:
+        if resp.status_code in {401, 403}:
             self._token = None
             resp = self._client.get(url, headers=self._headers())
         resp.raise_for_status()
@@ -362,7 +371,7 @@ class AvitoClient:
         url = self._resolve_url_template(self.send_message_url_template, chat_id=chat_id)
         payload = {"type": "text", "message": {"text": text}}
         resp = self._client.post(url, headers=self._headers(), json=payload)
-        if resp.status_code == 401:
+        if resp.status_code in {401, 403}:
             self._token = None
             resp = self._client.post(url, headers=self._headers(), json=payload)
         resp.raise_for_status()
@@ -395,7 +404,7 @@ class AvitoClient:
 
         url = f"https://api.avito.ru/stats/v2/accounts/{self.user_id}/items"
         resp = self._client.post(url, headers=self._headers(), json=payload)
-        if resp.status_code == 401:
+        if resp.status_code in {401, 403}:
             self._token = None
             resp = self._client.post(url, headers=self._headers(), json=payload)
         resp.raise_for_status()
@@ -406,7 +415,7 @@ class AvitoClient:
             raise RuntimeError("AVITO_USER_ID is not configured")
         url = f"https://api.avito.ru/core/v1/accounts/{self.user_id}/items/{item_id}/"
         resp = self._client.get(url, headers=self._headers())
-        if resp.status_code == 401:
+        if resp.status_code in {401, 403}:
             self._token = None
             resp = self._client.get(url, headers=self._headers())
         resp.raise_for_status()

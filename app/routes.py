@@ -803,12 +803,6 @@ def cabinet_page(request: Request):
         <button class="btn" id="logout">Выйти</button>
       </div>
 
-      <section class="cards">
-        <article class="card"><div class="k">Всего лидов</div><div class="v" id="k-total">0</div></article>
-        <article class="card"><div class="k">Оплачено</div><div class="v ok" id="k-paid">0</div></article>
-        <article class="card"><div class="k">Неуспешно</div><div class="v bad" id="k-lost">0</div></article>
-        <article class="card"><div class="k">Конверсия в оплату</div><div class="v" id="k-conv">0%</div></article>
-      </section>
       <section class="stage-funnel" id="stage-funnel"></section>
 
       <section class="filters">
@@ -1088,10 +1082,6 @@ def cabinet_page(request: Request):
         if (!resp.ok) return;
         const data = await resp.json();
         funnelCache = data;
-        document.getElementById("k-total").textContent = data.total;
-        document.getElementById("k-paid").textContent = data.paid;
-        document.getElementById("k-lost").textContent = data.lost;
-        document.getElementById("k-conv").textContent = `${data.conversion_paid_percent}%`;
         const statusSelect = document.getElementById("status");
         for (const s of statusValues) {
           const c = data.by_status[s] || 0;

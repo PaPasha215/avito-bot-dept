@@ -125,7 +125,6 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_api_base: str = "https://api.telegram.org"
     telegram_leads_chat_id: str | None = None
-    telegram_manager_chat_id: str | None = None
     telegram_qa_chat_id: str | None = None
     telegram_stats_chat_id: str | None = None
     telegram_webhook_secret: str | None = None

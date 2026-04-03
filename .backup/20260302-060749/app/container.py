@@ -67,6 +67,7 @@ class AppContainer:
         self.self_learning_service = SelfLearningService(settings=settings)
         self.stats_reporting_service = StatsReportingService(
             settings=settings,
+            avito_client=self.avito_client,
             telegram_client=self.telegram_client,
         )
         self.heartbeat_service = BotHealthHeartbeatService(

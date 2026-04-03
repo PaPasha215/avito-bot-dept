@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 
-from sqlalchemy import and_, delete, desc, func, select
+from sqlalchemy import and_, delete, desc, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.time import utcnow
@@ -15,6 +16,7 @@ from app.models import (
     EventLog,
     FeedbackEvent,
     Lead,
+    LeadTask,
     LearningExample,
     LearningReplyUsage,
     Message,
@@ -45,9 +47,17 @@ class Repository:
                 raw_category=raw_category,
                 url=url,
             )
-            self.db.add(ad)
-            self.db.flush()
-            return ad
+            try:
+                with self.db.begin_nested():
+                    self.db.add(ad)
+                    self.db.flush()
+            except IntegrityError:
+                # Another concurrent request inserted the ad first.
+                ad = self.db.scalar(select(Ad).where(Ad.external_ad_id == external_ad_id))
+                if ad is None:
+                    raise
+            else:
+                return ad
 
         ad.title = title
         ad.category = category
@@ -84,6 +94,7 @@ class Repository:
         text: str,
         external_message_id: str | None,
         payload_json: str | None,
+        created_at: datetime | None = None,
     ) -> Message | None:
         if external_message_id:
             exists = self.db.scalar(select(Message).where(Message.external_message_id == external_message_id))
@@ -96,12 +107,13 @@ class Repository:
             text=text,
             external_message_id=external_message_id,
             payload_json=payload_json,
+            created_at=created_at or utcnow(),
         )
         self.db.add(msg)
 
         chat = self.db.get(Chat, chat_id)
         if chat:
-            chat.last_message_at = utcnow()
+            chat.last_message_at = created_at or msg.created_at
         self.db.flush()
         return msg
 
@@ -198,6 +210,57 @@ class Repository:
             lead.sent_to_tg_at = utcnow()
             self.db.flush()
 
+    def get_operational_report_metrics(self, since: datetime, until: datetime) -> dict[str, int]:
+        anomaly_count = self.db.scalar(
+            select(func.count(EventLog.id)).where(
+                and_(
+                    EventLog.status == "FAILED",
+                    EventLog.updated_at >= since,
+                    EventLog.updated_at < until,
+                )
+            )
+        ) or 0
+
+        new_contacts_count = self.db.scalar(
+            select(func.count(Lead.id)).where(
+                and_(
+                    Lead.created_at >= since,
+                    Lead.created_at < until,
+                )
+            )
+        ) or 0
+
+        latest_message_ids = (
+            select(Message.chat_id.label("chat_id"), func.max(Message.id).label("message_id"))
+            .group_by(Message.chat_id)
+            .subquery()
+        )
+        non_actionable_states = [
+            ChatState.IGNORED_OUT_OF_SCOPE.value,
+            ChatState.CONTACT_RECEIVED.value,
+            ChatState.TRANSFERRED_TO_MANAGER.value,
+        ]
+        unanswered_count = self.db.scalar(
+            select(func.count())
+            .select_from(latest_message_ids)
+            .join(Message, Message.id == latest_message_ids.c.message_id)
+            .join(Chat, Chat.id == latest_message_ids.c.chat_id)
+            .where(
+                and_(
+                    Message.direction == MessageDirection.INBOUND.value,
+                    Message.created_at >= since,
+                    Message.created_at < until,
+                    Chat.state.not_in(non_actionable_states),
+                )
+            )
+        ) or 0
+
+        return {
+            "anomaly_count": int(anomaly_count),
+            "unanswered_count": int(unanswered_count),
+            "new_contacts_count": int(new_contacts_count),
+        }
+
     def get_or_create_prompt(self, key: str, default_version: str, default_text: str) -> Prompt:
         prompt = self.db.scalar(select(Prompt).where(Prompt.key == key))
         if prompt:
@@ -287,6 +350,23 @@ class Repository:
             select(Chat, Ad)
             .join(Ad, Chat.ad_id == Ad.id)
             .order_by(desc(Chat.updated_at))
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return rows
+
+    def list_youla_housekeeping_chats(self, limit: int = 200, offset: int = 0) -> list[tuple[Chat, Ad]]:
+        rows = self.db.execute(
+            select(Chat, Ad)
+            .join(Ad, Chat.ad_id == Ad.id)
+            .where(
+                and_(
+                    Chat.external_chat_id.like("youla:%"),
+                    Ad.category == "REAL_ESTATE",
+                    Chat.state != ChatState.IGNORED_OUT_OF_SCOPE.value,
+                )
+            )
+            .order_by(Chat.id.asc())
             .limit(limit)
             .offset(offset)
         ).all()
@@ -567,6 +647,205 @@ class Repository:
             select(Lead).order_by(desc(Lead.created_at)).limit(limit).offset(offset)
         ).all()
 
+    @staticmethod
+    def lead_source_from_external_chat_id(external_chat_id: str) -> str:
+        if ":" not in external_chat_id:
+            return "avito"
+        prefix = external_chat_id.split(":", 1)[0].strip().lower()
+        return prefix or "unknown"
+
+    def list_leads_with_context(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        status: str | None = None,
+        source: str | None = None,
+        query: str | None = None,
+    ) -> list[tuple[Lead, Chat, Ad]]:
+        stmt = (
+            select(Lead, Chat, Ad)
+            .join(Chat, Lead.chat_id == Chat.id)
+            .join(Ad, Chat.ad_id == Ad.id)
+        )
+
+        if status:
+            stmt = stmt.where(Lead.status == status)
+
+        if source:
+            source_normalized = source.strip().lower()
+            if source_normalized == "avito":
+                stmt = stmt.where(~Chat.external_chat_id.like("%:%"))
+            else:
+                stmt = stmt.where(Chat.external_chat_id.like(f"{source_normalized}:%"))
+
+        if query:
+            pattern = f"%{query.strip().lower()}%"
+            stmt = stmt.where(
+                or_(
+                    func.lower(Lead.contact_raw).like(pattern),
+                    func.lower(Lead.contact_normalized).like(pattern),
+                    func.lower(Lead.summary).like(pattern),
+                    func.lower(Ad.title).like(pattern),
+                    func.lower(Chat.external_chat_id).like(pattern),
+                )
+            )
+
+        rows = self.db.execute(
+            stmt.order_by(desc(Lead.created_at)).limit(limit).offset(offset)
+        ).all()
+        return rows
+
+    def count_leads_with_context(
+        self,
+        status: str | None = None,
+        source: str | None = None,
+        query: str | None = None,
+    ) -> int:
+        stmt = select(func.count(Lead.id)).join(Chat, Lead.chat_id == Chat.id).join(Ad, Chat.ad_id == Ad.id)
+
+        if status:
+            stmt = stmt.where(Lead.status == status)
+
+        if source:
+            source_normalized = source.strip().lower()
+            if source_normalized == "avito":
+                stmt = stmt.where(~Chat.external_chat_id.like("%:%"))
+            else:
+                stmt = stmt.where(Chat.external_chat_id.like(f"{source_normalized}:%"))
+
+        if query:
+            pattern = f"%{query.strip().lower()}%"
+            stmt = stmt.where(
+                or_(
+                    func.lower(Lead.contact_raw).like(pattern),
+                    func.lower(Lead.contact_normalized).like(pattern),
+                    func.lower(Lead.summary).like(pattern),
+                    func.lower(Ad.title).like(pattern),
+                    func.lower(Chat.external_chat_id).like(pattern),
+                )
+            )
+
+        return int(self.db.scalar(stmt) or 0)
+
+    def update_lead_status(self, lead_id: int, status: str) -> Lead | None:
+        lead = self.db.get(Lead, lead_id)
+        if lead is None:
+            return None
+        lead.status = status
+        self.db.flush()
+        return lead
+
+    def get_lead_with_context(self, lead_id: int) -> tuple[Lead, Chat, Ad] | None:
+        row = (
+            self.db.execute(
+                select(Lead, Chat, Ad)
+                .join(Chat, Lead.chat_id == Chat.id)
+                .join(Ad, Chat.ad_id == Ad.id)
+                .where(Lead.id == lead_id)
+            )
+            .first()
+        )
+        return row
+
+    def list_messages_by_chat(self, chat_id: int, limit: int = 120) -> list[Message]:
+        rows = self.db.scalars(
+            select(Message)
+            .where(Message.chat_id == chat_id)
+            .order_by(desc(Message.created_at))
+            .limit(limit)
+        ).all()
+        return list(reversed(rows))
+
+    def list_lead_tasks(self, lead_id: int) -> list[LeadTask]:
+        return self.db.scalars(
+            select(LeadTask)
+            .where(LeadTask.lead_id == lead_id)
+            .order_by(LeadTask.status.asc(), LeadTask.due_at.asc(), LeadTask.created_at.desc())
+        ).all()
+
+    def create_lead_task(self, lead_id: int, title: str, due_at: datetime | None = None) -> LeadTask:
+        task = LeadTask(
+            lead_id=lead_id,
+            title=title.strip(),
+            due_at=due_at,
+            status="OPEN",
+        )
+        self.db.add(task)
+        self.db.flush()
+        return task
+
+    def get_lead_task(self, task_id: int) -> LeadTask | None:
+        return self.db.get(LeadTask, task_id)
+
+    def update_lead_task(
+        self,
+        task_id: int,
+        *,
+        title: str | None = None,
+        due_at: datetime | None = None,
+        apply_due_at: bool = False,
+        status: str | None = None,
+    ) -> LeadTask | None:
+        task = self.db.get(LeadTask, task_id)
+        if task is None:
+            return None
+        if title is not None:
+            task.title = title.strip()
+        if apply_due_at:
+            task.due_at = due_at
+        if status is not None:
+            task.status = status
+            if status == "DONE":
+                task.completed_at = utcnow()
+            elif status in {"OPEN", "CANCELLED"}:
+                task.completed_at = None
+        task.updated_at = utcnow()
+        self.db.flush()
+        return task
+
+    def get_lead_detail(self, lead_id: int, message_limit: int = 120) -> dict | None:
+        row = self.get_lead_with_context(lead_id)
+        if row is None:
+            return None
+        lead, chat, ad = row
+        messages = self.list_messages_by_chat(chat_id=chat.id, limit=message_limit)
+        tasks = self.list_lead_tasks(lead_id=lead.id)
+        return {
+            "lead": lead,
+            "chat": chat,
+            "ad": ad,
+            "messages": messages,
+            "tasks": tasks,
+        }
+
+    def get_leads_funnel_snapshot(self) -> dict:
+        status_rows = self.db.execute(
+            select(Lead.status, func.count(Lead.id)).group_by(Lead.status)
+        ).all()
+        by_status: dict[str, int] = {str(status): int(count) for status, count in status_rows}
+
+        source_rows = self.db.execute(
+            select(Chat.external_chat_id)
+            .join(Lead, Lead.chat_id == Chat.id)
+        ).all()
+        by_source: dict[str, int] = {}
+        for (external_chat_id,) in source_rows:
+            source = self.lead_source_from_external_chat_id(external_chat_id or "")
+            by_source[source] = by_source.get(source, 0) + 1
+
+        total = int(sum(by_status.values()))
+        paid = int(by_status.get("PAID", 0) + by_status.get("WON", 0))
+        lost = int(by_status.get("LOST", 0))
+        conversion_paid_percent = round((paid / total * 100), 2) if total > 0 else 0.0
+        return {
+            "total": total,
+            "paid": paid,
+            "lost": lost,
+            "conversion_paid_percent": conversion_paid_percent,
+            "by_status": by_status,
+            "by_source": by_source,
+        }
+
     def list_ignored_logs(self, limit: int = 100, offset: int = 0) -> list[RoutingDecision]:
         return self.db.scalars(
             select(RoutingDecision)
@@ -586,6 +865,7 @@ class Repository:
             ("routing_decisions", RoutingDecision),
             ("events_log", EventLog),
             ("feedback_events", FeedbackEvent),
+            ("lead_tasks", LeadTask),
             ("leads", Lead),
             ("learning_reply_usage", LearningReplyUsage),
         ]:

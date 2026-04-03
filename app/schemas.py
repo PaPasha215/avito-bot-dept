@@ -152,5 +152,95 @@ class TelegramWebhookResponse(BaseModel):
     ok: bool
 
 
+class CabinetLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class CabinetAuthResponse(BaseModel):
+    ok: bool
+    role: str
+    username: str
+
+
+class CabinetMeResponse(BaseModel):
+    role: str
+    username: str
+
+
+class CabinetFunnelResponse(BaseModel):
+    total: int
+    paid: int
+    lost: int
+    conversion_paid_percent: float
+    by_status: dict[str, int]
+    by_source: dict[str, int]
+
+
+class CabinetLeadListItem(BaseModel):
+    id: int
+    source: str
+    external_chat_id: str
+    ad_title: str
+    ad_url: str | None
+    contact_raw: str
+    contact_normalized: str
+    summary: str
+    status: str
+    sent_to_tg_at: datetime | None
+    created_at: datetime
+
+
+class CabinetLeadsResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[CabinetLeadListItem]
+
+
+class CabinetLeadStatusUpdateRequest(BaseModel):
+    status: str = Field(min_length=2, max_length=64)
+
+
+class CabinetLeadMessageItem(BaseModel):
+    id: int
+    direction: str
+    text: str
+    created_at: datetime
+
+
+class CabinetLeadTaskItem(BaseModel):
+    id: int
+    title: str
+    status: str
+    due_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CabinetLeadDetailResponse(BaseModel):
+    lead: CabinetLeadListItem
+    chat_state: str
+    domain: str
+    ad_category: str | None
+    ad_raw_category: str | None
+    customer_name: str | None
+    messages: list[CabinetLeadMessageItem]
+    tasks: list[CabinetLeadTaskItem]
+
+
+class CabinetTaskCreateRequest(BaseModel):
+    title: str = Field(min_length=2, max_length=256)
+    due_at: datetime | None = None
+
+
+class CabinetTaskUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=256)
+    status: str | None = Field(default=None, min_length=2, max_length=32)
+    due_at: datetime | None = None
+    clear_due_at: bool = False
+
+
 class ErrorResponse(BaseModel):
     detail: str
